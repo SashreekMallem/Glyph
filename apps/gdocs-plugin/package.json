@@ -1,0 +1,19 @@
+{
+  "name": "@glyph/gdocs-plugin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"test/**/*.ts\"",
+    "test": "vitest run --passWithNoTests",
+    "push": "echo 'Install clasp globally: npm i -g @google/clasp && clasp login && clasp push' && exit 1"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.19.1",
+    "@typescript-eslint/parser": "^8.19.1",
+    "eslint": "^9.17.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
