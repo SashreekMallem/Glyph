@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Glyph — Extraction Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f0f0f; color: #e5e5e5;
+      min-height: 100vh; padding: 32px;
+    }
+    h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { font-size: 0.85rem; color: #888; margin-bottom: 24px; }
+    .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    button {
+      padding: 10px 20px; border-radius: 6px; border: none;
+      font-size: 0.85rem; font-weight: 500; cursor: pointer;
+    }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-secondary { background: #2a2a2a; color: #e5e5e5; border: 1px solid #3a3a3a; }
+    .btn-primary   { background: #e5e5e5; color: #0f0f0f; }
+    .status {
+      font-size: 0.8rem; color: #888; padding: 8px 14px;
+      background: #1a1a1a; border-radius: 6px; border: 1px solid #2a2a2a; flex: 1;
+    }
+    .status.ok      { color: #4ade80; border-color: #166534; }
+    .status.err     { color: #f87171; border-color: #7f1d1d; }
+    .status.loading { color: #facc15; border-color: #713f12; }
+    .progress-bar { height: 3px; background: #2a2a2a; border-radius: 2px; margin: 12px 0; }
+    .progress-fill { height: 100%; background: #4ade80; border-radius: 2px; transition: width 0.3s; width: 0%; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
+    label { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; color: #888; margin-bottom: 8px; }
+    textarea {
+      width: 100%; height: 420px; background: #1a1a1a; border: 1px solid #2a2a2a;
+      border-radius: 8px; color: #e5e5e5; font-size: 0.82rem; padding: 14px;
+      resize: vertical; font-family: inherit; line-height: 1.6;
+    }
+    pre {
+      background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px;
+      padding: 14px; font-size: 0.78rem; line-height: 1.6;
+      height: 420px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+    }
+    .panel { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .chunk {
+      margin-bottom: 10px; padding: 10px 12px; background: #141414;
+      border-radius: 6px; border-left: 3px solid #333; font-size: 0.8rem;
+    }
+    .chunk.done   { border-left-color: #4ade80; }
+    .chunk.active { border-left-color: #facc15; }
+    .chunk-header { display: flex; justify-content: space-between; margin-bottom: 4px; color: #ccc; }
+    .chunk-text   { color: #666; font-size: 0.75rem; }
+    .stage-header { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; color: #555; margin-bottom: 10px; }
+    .note { font-size: 0.75rem; color: #555; padding: 8px 12px; background: #141414; border-radius: 6px; margin-bottom: 16px; border: 1px solid #2a2a2a; }
+    .timing { font-size: 0.75rem; color: #555; margin-top: 6px; }
+  </style>
+</head>
+<body>
+
+<h1>Glyph — Extraction Test</h1>
+<p class="subtitle">LLM extracts structured JSON from prose. Verbatim constraint prevents hallucination. GLiNER runs in production via the Next.js app.</p>
+
+<div class="note" id="gliner-note"></div>
+
+<div class="controls">
+  <button class="btn-secondary" id="btn-load">Load LLM</button>
+  <button class="btn-primary"   id="btn-run" disabled>Extract</button>
+  <div class="status" id="status">Load the LLM first.</div>
+</div>
+<div class="progress-bar"><div class="progress-fill" id="progress"></div></div>
+
+<div class="grid">
+  <div>
+    <label>Paste resume here</label>
+    <textarea id="input" placeholder="Paste your resume text here..."></textarea>
+    <div class="timing" id="timing"></div>
+  </div>
+  <div>
+    <label>Structured JSON output</label>
+    <pre id="output">// Output appears here</pre>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="stage-header">Chunks — classified by heading, extracted by LLM</div>
+  <div id="chunks-list" style="color:#555;font-size:0.8rem">Run extraction to see chunks.</div>
+</div>
+
+<script type="module">
+import {
+  chunkDocument,
+  classifySection,
+  buildPrompt,
+  stripHallucinations,
+  hasContent,
+  parseJSON,
+  loadLLM,
+  GLINER_NOTE,
+} from "./extract.js";
+
+document.getElementById("gliner-note").textContent = GLINER_NOTE;
+
+const statusEl   = document.getElementById("status");
+const outputEl   = document.getElementById("output");
+const progressEl = document.getElementById("progress");
+const chunksEl   = document.getElementById("chunks-list");
+const timingEl   = document.getElementById("timing");
+const btnLoad    = document.getElementById("btn-load");
+const btnRun     = document.getElementById("btn-run");
+const inputEl    = document.getElementById("input");
+
+const setStatus   = (msg, type = "") => { statusEl.textContent = msg; statusEl.className = "status" + (type ? " " + type : ""); };
+const setProgress = (p) => { progressEl.style.width = p + "%"; };
+
+let llm = null;
+
+btnLoad.addEventListener("click", async () => {
+  btnLoad.disabled = true;
+  setStatus("Downloading Qwen2.5-0.5B-Instruct…", "loading");
+  setProgress(5);
+  try {
+    llm = await loadLLM((p) => {
+      if (p.status === "progress" && p.total) {
+        setProgress(5 + Math.round((p.loaded / p.total) * 85));
+        setStatus(`Downloading: ${Math.round(p.loaded / 1e6)}MB / ${Math.round(p.total / 1e6)}MB`, "loading");
+      }
+    });
+    setProgress(100);
+    setStatus("LLM ready. Paste a resume and click Extract.", "ok");
+    btnRun.disabled = false;
+    btnLoad.textContent = "✓ LLM Loaded";
+  } catch (err) {
+    setStatus("Failed: " + err.message, "err");
+    btnLoad.disabled = false;
+  }
+});
+
+btnRun.addEventListener("click", async () => {
+  const text = inputEl.value.trim();
+  if (!text) { setStatus("Paste a document first.", "err"); return; }
+  if (!llm)  { setStatus("Load LLM first.", "err"); return; }
+
+  btnRun.disabled = true;
+  chunksEl.innerHTML = "";
+  outputEl.textContent = "// Processing…";
+  setProgress(0);
+  const t0 = Date.now();
+
+  const chunks = chunkDocument(text);
+  setStatus(`${chunks.length} chunks found. Extracting…`, "loading");
+
+  const result = { document_type: "resume", schema_version: "1.0" };
+  const arrayAccum = {};
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const section = classifySection(chunk.heading, chunk.text);
+
+    const div = document.createElement("div");
+    div.className = "chunk active";
+    div.id = `chunk-${i}`;
+    div.innerHTML = `
+      <div class="chunk-header">
+        <span>${chunk.heading}</span>
+        <span style="color:${section ? "#facc15" : "#555"};font-size:0.72rem">${section || "skipped"}</span>
+      </div>
+      <div class="chunk-text">${chunk.text.slice(0, 120).replace(/</g, "&lt;")}…</div>
+    `;
+    chunksEl.appendChild(div);
+
+    setProgress(Math.round((i / chunks.length) * 90));
+    setStatus(`Processing chunk ${i + 1}/${chunks.length}: ${chunk.heading}`, "loading");
+
+    if (!section) {
+      div.className = "chunk";
+      continue;
+    }
+
+    try {
+      // GLiNER spans passed as [] here — production wires in real spans from gliner.worker.ts
+      const prompt = buildPrompt(section, [], chunk.text);
+      const out = await llm(prompt, {
+        max_new_tokens: 500,
+        temperature: 0.05,
+        do_sample: false,
+        return_full_text: false,
+      });
+
+      const parsed = parseJSON(out[0].generated_text);
+      if (parsed) {
+        const clean = stripHallucinations(parsed, text);
+        if (Array.isArray(clean)) {
+          if (!arrayAccum[section]) arrayAccum[section] = [];
+          arrayAccum[section].push(...clean.filter(hasContent));
+          result[section] = arrayAccum[section];
+        } else if (section === "summary") {
+          result.summary = clean.summary || "";
+        } else {
+          result[section] = { ...(result[section] || {}), ...clean };
+        }
+      }
+    } catch (err) {
+      console.error("LLM error chunk", i, err);
+    }
+
+    div.className = "chunk done";
+    outputEl.textContent = JSON.stringify(result, null, 2);
+  }
+
+  setProgress(100);
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  timingEl.textContent = `Done in ${elapsed}s — ${chunks.length} chunks`;
+  setStatus(`Complete in ${elapsed}s.`, "ok");
+  outputEl.textContent = JSON.stringify(result, null, 2);
+  btnRun.disabled = false;
+});
+</script>
+</body>
+</html>
