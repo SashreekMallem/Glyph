@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top" />
+    <meta charset="utf-8" />
+    <style>
+      :root {
+        --ink: #111;
+        --mute: #888;
+        --line: #e5e5e5;
+        --ok: #0a7a33;
+        --bad: #a11818;
+        --bg: #fff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Helvetica Neue', sans-serif;
+        font-weight: 300;
+        color: var(--ink);
+        background: var(--bg);
+        margin: 0;
+        padding: 20px 16px;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      h1 { font-weight: 200; font-size: 22px; letter-spacing: -0.02em; margin: 0 0 16px; }
+      .mute { color: var(--mute); }
+      .row { margin-bottom: 14px; }
+      label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--mute); margin-bottom: 6px; }
+      input[type='password'], input[type='text'] {
+        width: 100%;
+        border: 1px solid var(--line);
+        padding: 8px 10px;
+        font: inherit;
+        font-weight: 300;
+        background: #fafafa;
+      }
+      input:focus { outline: none; border-color: var(--ink); }
+      .seg { display: flex; border: 1px solid var(--line); }
+      .seg button {
+        flex: 1;
+        background: transparent;
+        border: 0;
+        border-right: 1px solid var(--line);
+        padding: 8px 6px;
+        font: inherit;
+        font-weight: 300;
+        cursor: pointer;
+        text-transform: capitalize;
+      }
+      .seg button:last-child { border-right: 0; }
+      .seg button[aria-pressed='true'] { background: var(--ink); color: #fff; }
+      button.primary {
+        width: 100%;
+        padding: 10px;
+        background: var(--ink);
+        color: #fff;
+        border: 0;
+        font: inherit;
+        font-weight: 400;
+        cursor: pointer;
+      }
+      button.primary:disabled { background: #ccc; cursor: not-allowed; }
+      button.ghost {
+        background: transparent;
+        border: 1px solid var(--line);
+        padding: 6px 10px;
+        font: inherit;
+        font-weight: 300;
+        cursor: pointer;
+      }
+      .status { padding: 10px 12px; border: 1px solid var(--line); font-size: 12px; }
+      .status.ok { color: var(--ok); border-color: var(--ok); }
+      .status.bad { color: var(--bad); border-color: var(--bad); }
+      .missing { margin: 8px 0 0 0; padding: 0 0 0 16px; }
+      .missing li { font-size: 12px; color: var(--mute); }
+      .hidden { display: none; }
+      .footer { margin-top: 20px; font-size: 11px; color: var(--mute); }
+      hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+    </style>
+  </head>
+  <body>
+    <h1>Glyph</h1>
+
+    <div id='connect' class='hidden'>
+      <div class='row'>
+        <label for='api-key'>API key</label>
+        <input type='password' id='api-key' placeholder='sk_live_...' autocomplete='off' />
+      </div>
+      <button class='primary' id='save-key'>Connect</button>
+    </div>
+
+    <div id='main' class='hidden'>
+      <div class='row'>
+        <label>Document type</label>
+        <div class='seg' role='tablist'>
+          <button type='button' data-type='contract' aria-pressed='true'>contract</button>
+          <button type='button' data-type='resume' aria-pressed='false'>resume</button>
+          <button type='button' data-type='invoice' aria-pressed='false'>invoice</button>
+        </div>
+      </div>
+
+      <div class='row'>
+        <button class='primary' id='validate'>Validate</button>
+      </div>
+
+      <div id='status' class='status mute'>Not validated yet.</div>
+      <ul id='missing' class='missing hidden'></ul>
+
+      <hr />
+
+      <div class='row'>
+        <button class='primary' id='finalize' disabled>Finalize & Embed</button>
+      </div>
+
+      <div id='finalized' class='status ok hidden'>Finalized. Payload embedded in Drive properties.</div>
+
+      <div class='footer'>
+        <button class='ghost' id='disconnect'>Disconnect</button>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var state = { docType: 'contract', valid: false };
+
+        function $(id) { return document.getElementById(id); }
+
+        function show(id) { $(id).classList.remove('hidden'); }
+        function hide(id) { $(id).classList.add('hidden'); }
+
+        function init() {
+          google.script.run
+            .withSuccessHandler(function (has) {
+              if (has) { show('main'); } else { show('connect'); }
+            })
+            .withFailureHandler(function () { show('connect'); })
+            .hasApiKey();
+        }
+
+        $('save-key').addEventListener('click', function () {
+          var key = $('api-key').value.trim();
+          if (!key) return;
+          $('save-key').disabled = true;
+          google.script.run
+            .withSuccessHandler(function () {
+              hide('connect');
+              show('main');
+              $('save-key').disabled = false;
+            })
+            .withFailureHandler(function (e) {
+              $('save-key').disabled = false;
+              alert('Could not save key: ' + (e && e.message ? e.message : e));
+            })
+            .setApiKey(key);
+        });
+
+        $('disconnect').addEventListener('click', function () {
+          google.script.run
+            .withSuccessHandler(function () {
+              hide('main');
+              show('connect');
+              $('api-key').value = '';
+            })
+            .setApiKey('');
+        });
+
+        var segButtons = document.querySelectorAll('.seg button');
+        segButtons.forEach(function (b) {
+          b.addEventListener('click', function () {
+            segButtons.forEach(function (x) { x.setAttribute('aria-pressed', 'false'); });
+            b.setAttribute('aria-pressed', 'true');
+            state.docType = b.getAttribute('data-type');
+            resetValidation();
+          });
+        });
+
+        function resetValidation() {
+          state.valid = false;
+          $('finalize').disabled = true;
+          hide('finalized');
+          hide('missing');
+          var s = $('status');
+          s.textContent = 'Not validated yet.';
+          s.className = 'status mute';
+        }
+
+        $('validate').addEventListener('click', function () {
+          $('validate').disabled = true;
+          var s = $('status');
+          s.textContent = 'Validating...';
+          s.className = 'status mute';
+          google.script.run
+            .withSuccessHandler(function (res) {
+              $('validate').disabled = false;
+              renderValidation(res);
+            })
+            .withFailureHandler(function (e) {
+              $('validate').disabled = false;
+              s.textContent = 'Error: ' + (e && e.message ? e.message : e);
+              s.className = 'status bad';
+            })
+            .validateDocument(state.docType);
+        });
+
+        function renderValidation(res) {
+          var s = $('status');
+          var m = $('missing');
+          if (res && res.error) {
+            s.textContent = res.error.message || 'Validation failed.';
+            s.className = 'status bad';
+            hide('missing');
+            return;
+          }
+          var errors = (res && res.errors) || [];
+          if (res && res.valid) {
+            state.valid = true;
+            s.textContent = 'Valid. Ready to finalize.';
+            s.className = 'status ok';
+            hide('missing');
+            $('finalize').disabled = false;
+          } else {
+            state.valid = false;
+            s.textContent = 'Missing or invalid fields (' + errors.length + '):';
+            s.className = 'status bad';
+            m.innerHTML = '';
+            for (var i = 0; i < errors.length; i++) {
+              var li = document.createElement('li');
+              li.textContent = errors[i].path + ' — ' + errors[i].message;
+              m.appendChild(li);
+            }
+            show('missing');
+            $('finalize').disabled = true;
+          }
+        }
+
+        $('finalize').addEventListener('click', function () {
+          $('finalize').disabled = true;
+          var s = $('status');
+          s.textContent = 'Finalizing...';
+          s.className = 'status mute';
+          google.script.run
+            .withSuccessHandler(function (res) {
+              if (res && res.error) {
+                s.textContent = res.error.message || 'Finalize failed.';
+                s.className = 'status bad';
+                $('finalize').disabled = false;
+                return;
+              }
+              s.textContent = 'Finalized.';
+              s.className = 'status ok';
+              show('finalized');
+            })
+            .withFailureHandler(function (e) {
+              $('finalize').disabled = false;
+              s.textContent = 'Error: ' + (e && e.message ? e.message : e);
+              s.className = 'status bad';
+            })
+            .finalizeDocument(state.docType);
+        });
+
+        init();
+      })();
+    </script>
+  </body>
+</html>

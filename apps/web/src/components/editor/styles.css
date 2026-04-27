@@ -1,0 +1,97 @@
+/* Glyph editor — premium minimalist surface. */
+.glyph-editor {
+  padding: 4rem 1.5rem;
+  max-width: 48rem;
+  margin: 0 auto;
+  font-family: ui-serif, Georgia, serif;
+  color: #111;
+  line-height: 1.55;
+}
+
+.glyph-editor section {
+  margin-bottom: 2.5rem;
+}
+
+.glyph-editor section[data-heading]::before {
+  content: attr(data-heading);
+  display: block;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #999;
+  margin-bottom: 0.75rem;
+}
+
+.glyph-paragraph {
+  margin: 0.6rem 0;
+  min-height: 1.55em;
+}
+.glyph-paragraph:empty::before {
+  content: "Write anything — a resume, contract, invoice. The page watches and labels as you go.";
+  color: #bbb;
+  font-style: italic;
+  pointer-events: none;
+}
+
+.glyph-field {
+  position: relative;
+  padding: 0.5rem 0 0.5rem 0;
+  margin: 0.4rem 0;
+  border-left: 2px solid #111;
+  padding-left: 0.9rem;
+  background: #fafafa;
+  animation: glyph-promote 0.4s ease;
+}
+
+.glyph-field::before {
+  content: attr(data-label);
+  display: block;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #111;
+  margin-bottom: 0.2rem;
+}
+
+.glyph-field::after {
+  content: attr(data-confidence);
+  position: absolute;
+  top: 0.4rem;
+  right: 0.5rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.6rem;
+  color: #999;
+}
+
+@keyframes glyph-promote {
+  from { background: #fef3c7; transform: translateX(-2px); }
+  to   { background: #fafafa; transform: translateX(0); }
+}
+
+.glyph-editor .ProseMirror {
+  outline: none;
+}
+.glyph-editor .ProseMirror:focus {
+  outline: none;
+}
+
+/* Validation indicator chips in the sidebar. */
+.glyph-validation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.glyph-validation-chip[data-kind="valid"] {
+  background: #ecfdf5;
+  color: #065f46;
+}
+.glyph-validation-chip[data-kind="invalid"] {
+  background: #fef2f2;
+  color: #991b1b;
+}
