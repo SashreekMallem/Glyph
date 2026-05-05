@@ -14,7 +14,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
-import { applyPatches, decode, type RFC6902Patch } from "@glyph/extract";
+import { applyPatches, decode, type RFC6902Patch } from "@glyph/extract/client";
 
 import { ExtractClient } from "@/lib/extract/client";
 import type { ExtractedField } from "@/components/editor/FieldsPanel";
