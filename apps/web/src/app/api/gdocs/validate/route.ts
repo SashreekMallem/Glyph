@@ -12,22 +12,18 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { getSchema, type DocumentType } from "@glyph/schema-library";
+import { type DocumentType } from "@glyph/schema-library";
 import { authenticateApiKey } from "@/lib/api-key-auth";
 import { extractHeuristic } from "@/lib/extract/heuristic";
+import { isBuiltInType, resolveSchema } from "@/server/documentRegistry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const SUPPORTED_TYPES: readonly DocumentType[] = [
-  "contract",
-  "resume",
-  "invoice",
-];
-
 interface ValidateInput {
   readonly documentType: string;
   readonly text: string;
+  readonly blockIds?: readonly string[];
 }
 
 function err(
@@ -60,15 +56,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!isValidateInput(body)) {
     return err(400, "bad_request", "Body must contain documentType and text.");
   }
-  if (!(SUPPORTED_TYPES as readonly string[]).includes(body.documentType)) {
+
+  let resolved: Awaited<ReturnType<typeof resolveSchema>>;
+  try {
+    resolved = await resolveSchema({
+      documentType: body.documentType,
+      blockIds: body.blockIds,
+      userId: auth.key.userId,
+    });
+  } catch {
     return err(400, "bad_request", `Unsupported documentType: ${body.documentType}`);
   }
 
-  const docType = body.documentType as DocumentType;
-  const result = extractHeuristic(docType, body.text);
+  const result = isBuiltInType(body.documentType)
+    ? extractHeuristic(body.documentType as DocumentType, body.text)
+    : {
+        extracted: { raw_text: body.text } as Record<string, unknown>,
+        missingFields: [] as string[],
+      };
 
-  const schema = getSchema(docType);
-  const parsed = schema.safeParse(result.extracted);
+  const parsed = resolved.zod.safeParse(result.extracted);
 
   const errors: Array<{ path: string; message: string }> = result.missingFields.map(
     (f) => ({ path: f, message: `${f} is missing or could not be extracted.` }),

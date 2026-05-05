@@ -158,6 +158,47 @@ const finalizeDocument = (documentType) => {
 }
 
 /**
+ * Self-healing-sync: send the active document text to the unified sync
+ * endpoint. If the server reports drift, the refreshed payload is written
+ * back into Drive appProperties so the document and its embedded JSON stay
+ * in lockstep — even when edits happened outside Glyph.
+ *
+ * Apps Script can't upload binary files, so the gdocs path sends `text +
+ * stored payload` rather than the .docx bundle and the server reconstructs
+ * the bundle internally. (See `/api/gdocs/sync` once it ships; until then
+ * this calls `/api/gdocs/finalize` which already implements the same
+ * "extract → sign" loop end-to-end.)
+ */
+const syncDocument = () => {
+  const doc = DocumentApp.getActiveDocument()
+  const text = doc.getBody().getText()
+  const googleDocId = doc.getId()
+  const stored = readStoredPayload(googleDocId)
+
+  if (!stored || !stored.documentType) {
+    // Document was never finalized via Glyph — nothing to sync.
+    return { ok: true, status: 'no_payload' }
+  }
+
+  const result = glyphFetch_('/api/gdocs/finalize', {
+    documentType: stored.documentType,
+    text,
+    googleDocId,
+  })
+  if (result.error) return result
+
+  writeStoredPayload(googleDocId, {
+    encrypted: result.encrypted,
+    iv: result.iv,
+    tag: result.tag,
+    signature: result.signature,
+    documentType: result.documentType,
+    schemaVersion: result.schemaVersion,
+  })
+  return { ok: true, status: 'synced' }
+}
+
+/**
  * Read the finalized payload back from Drive appProperties, reassembling
  * chunks. Returns null if the file has never been finalized.
  */

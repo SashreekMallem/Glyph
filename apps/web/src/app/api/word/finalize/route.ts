@@ -1,10 +1,24 @@
+/**
+ * POST /api/word/finalize
+ *
+ * First-time finalize for Word-originated documents. Validates,
+ * canonicalizes, attaches `_meta` (signed fingerprints + regions),
+ * encrypts, and signs — returns the encrypted blob for the Word plugin to
+ * embed into the .docx Custom XML Part.
+ *
+ * On every subsequent open/save the plugin should call `/api/v1/sync`
+ * instead. That endpoint detects field-level drift and refreshes the
+ * embedded payload field-by-field — no full re-extraction needed.
+ *
+ * Does NOT persist to DB — payload travels with the document.
+ */
+
 import { type NextRequest } from "next/server";
 
 import { encryptPayload, signPayload } from "@glyph/crypto";
 
-import { db } from "@/db";
-import { documents } from "@/db/schema";
 import { canonicalize } from "@/lib/canonicalize";
+import { attachMeta, buildMeta } from "@/lib/payload-meta";
 
 import {
   jsonWithCors,
@@ -30,7 +44,7 @@ export async function POST(req: NextRequest) {
   const body = await parseBody(req);
   if (body instanceof Response) return body;
 
-  const outcome = runValidation(body);
+  const outcome = await runValidation(body);
   if (!outcome.valid || outcome.data === null) {
     return jsonWithCors(
       req,
@@ -48,41 +62,30 @@ export async function POST(req: NextRequest) {
     return jsonWithCors(req, { error: "Canonical payload must be an object." }, 500);
   }
 
-  const { encrypted, iv, tag } = await encryptPayload(canonical);
-  const signature = await signPayload(encrypted);
-
   const schemaVersion =
     typeof (outcome.data as { schema_version?: unknown }).schema_version === "string"
       ? ((outcome.data as { schema_version: string }).schema_version)
       : DEFAULT_SCHEMA_VERSION;
 
-  // Persist as a finalized document row so the web UI lists Word-originated
-  // docs alongside ones authored in the editor.
-  try {
-    await db.insert(documents).values({
-      userId: auth.userId,
-      title: `${body.documentType} (Word)`,
-      documentType: body.documentType,
-      documentTypeKey: body.documentType,
-      schemaVersion,
-      validatedJson: outcome.data as Record<string, unknown>,
-      encryptedPayload: encrypted,
-      payloadIv: iv,
-      payloadTag: tag,
-      payloadSignature: signature,
-      isFinalized: true,
-    });
-  } catch (e) {
-    // DB persistence is best-effort from the plugin's perspective — the
-    // encrypted payload is still safe to embed even if the row insert
-    // failed. Log and continue.
-    // eslint-disable-next-line no-console
-    console.error("[word/finalize] insert failed", {
-      userId: auth.userId,
-      documentType: body.documentType,
-      error: e instanceof Error ? e.message : String(e),
-    });
-  }
+  // Self-healing-sync metadata: per-leaf fingerprints + regions inside the
+  // signed envelope. If the plugin didn't send regions, we sign empty maps
+  // so the sync endpoint can still authenticate the payload — drift then
+  // forces a full re-extract on the first sync call.
+  const meta = buildMeta({
+    sourceText: body.text,
+    regions: body.regions ?? {},
+    schemaVersion,
+    blockIds: outcome.resolved?.blockIds ?? null,
+    compositionId: outcome.resolved?.compositionId ?? null,
+  });
+  const withMeta = attachMeta(canonical as Record<string, unknown>, meta);
+
+  const { encrypted, iv, tag } = await encryptPayload(withMeta);
+  const signature = await signPayload(encrypted);
+
+  // No DB persistence: the .docx Custom XML Part is the storage medium for
+  // Word-originated documents. Keeping plaintext validated JSON in Postgres
+  // would be a data-leak surface for no benefit.
 
   return jsonWithCors(req, {
     encrypted,
@@ -91,5 +94,7 @@ export async function POST(req: NextRequest) {
     signature,
     schemaVersion,
     documentType: body.documentType,
+    compositionId: outcome.resolved?.compositionId ?? null,
+    blockIds: outcome.resolved?.blockIds ?? null,
   });
 }

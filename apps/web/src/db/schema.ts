@@ -12,6 +12,7 @@
 
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -172,17 +173,40 @@ export const documents = pgTable(
     /** Optional FK to the template the user authored against. */
     templateId: uuid("template_id"),
     schemaVersion: text("schema_version").notNull().default("1.0"),
-    prosemirrorState: jsonb("prosemirror_state"),
     /**
-     * Plaintext validated JSON. Server-only; never returned by public APIs
-     * except the authenticated extract endpoint (which uses the encrypted
-     * column) or internal owner reads prior to finalization.
+     * Encrypted-at-rest editor state and validated payload.
+     *
+     * Both the raw ProseMirror document the user typed and the extracted
+     * structured JSON are written using {@link encryptPayload} before they
+     * touch the DB. The plaintext never lives on disk; decrypt only happens
+     * server-side on owner reads (and never crosses the public API as
+     * plaintext post-finalization).
+     *
+     * Each pair is independent so we can rotate or invalidate one without
+     * disturbing the other (e.g. drop ProseMirror state on finalize while
+     * keeping the validated payload + signature for verification).
      */
-    validatedJson: jsonb("validated_json"),
+    prosemirrorEncrypted: text("prosemirror_encrypted"),
+    prosemirrorIv: text("prosemirror_iv"),
+    prosemirrorTag: text("prosemirror_tag"),
+    validatedEncrypted: text("validated_encrypted"),
+    validatedIv: text("validated_iv"),
+    validatedTag: text("validated_tag"),
+    /**
+     * Canonical signed payload, set by `finalize`. This is the authoritative
+     * copy embedded in Word/Docs/PDF exports — same bytes everywhere so the
+     * `payload_signature` matches whichever surface the consumer reads from.
+     */
     encryptedPayload: text("encrypted_payload"),
     payloadSignature: text("payload_signature"),
     payloadIv: text("payload_iv"),
     payloadTag: text("payload_tag"),
+    /**
+     * Pointer into `schema_compositions` for the resolved adaptive schema
+     * this document was authored against. Null for legacy documents that
+     * predate the composition resolver.
+     */
+    compositionId: uuid("composition_id"),
     isFinalized: boolean("is_finalized").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -256,6 +280,191 @@ export const apiUsage = pgTable(
   }),
 );
 
+/**
+ * Bi-temporal extraction tracking.
+ *
+ * Each `extraction_sessions` row groups the episodes produced by a single
+ * model run for a single document. Aggregate token/cost counters mirror the
+ * per-episode counters so cost reporting can be answered without joins.
+ *
+ * `extraction_episodes` rows are immutable RFC 6902 JSON patches. To revise
+ * the asserted facts without rewriting history we insert a new episode and
+ * point the older row's `supersededBy` at it. Two time axes are kept:
+ *   - `appliedAt`  — when the patch was written (transaction time).
+ *   - `validFrom`  — when the asserted facts started being true.
+ *   - `validTo`    — when those facts ceased being true; null = current.
+ *
+ * `total_cost_micros` and per-document costs are stored as bigint micros
+ * (1 USD = 1_000_000) so we never lose sub-cent precision; Drizzle returns
+ * bigint columns as `string` by default, hence the `mode: "bigint"` hint.
+ */
+export const extractionSessions = pgTable(
+  "extraction_sessions",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    docId: uuid("doc_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    // references auth.users(id)
+    userId: uuid("user_id").notNull(),
+    schemaType: text("schema_type").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    totalTokensIn: integer("total_tokens_in").notNull().default(0),
+    totalTokensOut: integer("total_tokens_out").notNull().default(0),
+    totalCachedTokens: integer("total_cached_tokens").notNull().default(0),
+    totalCostMicros: bigint("total_cost_micros", { mode: "bigint" })
+      .notNull()
+      .default(sql`0`),
+    model: text("model").notNull().default("gemini-2.5-flash-lite"),
+  },
+  (t) => ({
+    userStartedIdx: index("idx_sessions_user_started").on(
+      t.userId,
+      t.startedAt.desc(),
+    ),
+  }),
+);
+
+export const extractionEpisodes = pgTable(
+  "extraction_episodes",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    docId: uuid("doc_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    // references auth.users(id)
+    userId: uuid("user_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => extractionSessions.id, { onDelete: "cascade" }),
+    appliedAt: timestamp("applied_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    validFrom: timestamp("valid_from", { withTimezone: true }).notNull(),
+    /** Null = currently valid. */
+    validTo: timestamp("valid_to", { withTimezone: true }),
+    /** RFC 6902 patch array. */
+    patch: jsonb("patch").notNull(),
+    sourceOffsetStart: integer("source_offset_start"),
+    sourceOffsetEnd: integer("source_offset_end"),
+    model: text("model").notNull(),
+    tokensIn: integer("tokens_in").notNull().default(0),
+    tokensOut: integer("tokens_out").notNull().default(0),
+    cachedTokens: integer("cached_tokens").notNull().default(0),
+    /** Self-FK; set when a later episode revises this one. */
+    supersededBy: uuid("superseded_by"),
+    schemaVersion: text("schema_version").notNull().default("1.0"),
+  },
+  (t) => ({
+    docValidIdx: index("idx_episodes_doc_valid")
+      .on(t.docId)
+      .where(sql`${t.validTo} IS NULL`),
+    sessionIdx: index("idx_episodes_session").on(t.sessionId),
+    userAppliedIdx: index("idx_episodes_user_applied").on(
+      t.userId,
+      t.appliedAt.desc(),
+    ),
+    docAppliedIdx: index("idx_episodes_doc_applied").on(t.docId, t.appliedAt),
+  }),
+);
+
+/**
+ * Adaptive-schema atomic blocks.
+ *
+ * A `schema_block` is a small, reusable JSON Schema fragment (always
+ * `type: "object"`) that contributes properties to a domain's overall
+ * schema. The composition resolver merges blocks at runtime to produce
+ * the schema a document is validated against.
+ */
+export const schemaBlocks = pgTable("schema_blocks", {
+  id: text("id").primaryKey(), // e.g. "resume.base.v1"
+  domain: text("domain").notNull(),
+  name: text("name").notNull(),
+  version: text("version").notNull().default("1.0"),
+  jsonSchema: jsonb("json_schema").notNull(),
+  isCurated: boolean("is_curated").notNull().default(false),
+  isRequiredForDomain: boolean("is_required_for_domain")
+    .notNull()
+    .default(false),
+  dependsOn: text("depends_on")
+    .array()
+    .notNull()
+    .default(sql`'{}'`),
+  usageCount: bigint("usage_count", { mode: "bigint" })
+    .notNull()
+    .default(sql`0`),
+  proposedByUserId: uuid("proposed_by_user_id"),
+  approvedByUserId: uuid("approved_by_user_id"),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
+ * Cached compositions of `schema_blocks`. Keyed by a deterministic
+ * sha256 fingerprint of the sorted block-id list, so identical
+ * compositions are deduped across users. The compiled JSON Schema is
+ * the source of truth at runtime — once cached it is never recomputed.
+ */
+export const schemaCompositions = pgTable(
+  "schema_compositions",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    domain: text("domain").notNull(),
+    blockIds: text("block_ids").array().notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    compiledJsonSchema: jsonb("compiled_json_schema").notNull(),
+    reuseCount: bigint("reuse_count", { mode: "bigint" })
+      .notNull()
+      .default(sql`0`),
+    firstSeenUserId: uuid("first_seen_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    fingerprintUnique: uniqueIndex("schema_compositions_fingerprint_unique").on(
+      t.fingerprint,
+    ),
+  }),
+);
+
+/**
+ * User-submitted proposals for new schema blocks. Reviewed offline and
+ * either merged into an existing block or promoted to a curated block.
+ */
+export const schemaBlockProposals = pgTable("schema_block_proposals", {
+  id: uuid("id")
+    .primaryKey()
+    .default(sql`gen_random_uuid()`),
+  domain: text("domain").notNull(),
+  proposedName: text("proposed_name").notNull(),
+  proposedJsonSchema: jsonb("proposed_json_schema").notNull(),
+  rationale: text("rationale"),
+  proposedByUserId: uuid("proposed_by_user_id"),
+  status: text("status").notNull().default("pending"),
+  mergedIntoBlockId: text("merged_into_block_id"),
+  reviewNote: text("review_note"),
+  reviewedByUserId: uuid("reviewed_by_user_id"),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
 export type UserProfile = typeof usersProfile.$inferSelect;
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;
@@ -266,3 +475,13 @@ export type DocumentTypeRow = typeof documentTypes.$inferSelect;
 export type NewDocumentTypeRow = typeof documentTypes.$inferInsert;
 export type DocumentTemplate = typeof documentTemplates.$inferSelect;
 export type NewDocumentTemplate = typeof documentTemplates.$inferInsert;
+export type ExtractionSession = typeof extractionSessions.$inferSelect;
+export type NewExtractionSession = typeof extractionSessions.$inferInsert;
+export type ExtractionEpisode = typeof extractionEpisodes.$inferSelect;
+export type NewExtractionEpisode = typeof extractionEpisodes.$inferInsert;
+export type SchemaBlock = typeof schemaBlocks.$inferSelect;
+export type NewSchemaBlock = typeof schemaBlocks.$inferInsert;
+export type SchemaComposition = typeof schemaCompositions.$inferSelect;
+export type NewSchemaComposition = typeof schemaCompositions.$inferInsert;
+export type SchemaBlockProposal = typeof schemaBlockProposals.$inferSelect;
+export type NewSchemaBlockProposal = typeof schemaBlockProposals.$inferInsert;

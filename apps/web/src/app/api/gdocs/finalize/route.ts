@@ -1,38 +1,41 @@
 /**
  * POST /api/gdocs/finalize
  *
- * Input: { documentType: DocumentType, text: string, googleDocId: string }
- * Output: { encrypted, iv, tag, signature, schemaVersion, documentType }
+ * First-time finalize for Google Docs documents. Validates, canonicalizes,
+ * attaches `_meta` (signed fingerprints + regions), encrypts, and signs —
+ * returns the encrypted blob for the add-on to write into Drive
+ * appProperties.
  *
- * Also records a finalized document row and a document_exports row keyed
- * by the Google Doc fileId so we can reconcile future edits.
+ * On every subsequent open/save the add-on should call `syncDocument()`
+ * (Apps Script wrapper around `/api/v1/sync`) instead. That path detects
+ * field-level drift and refreshes the embedded payload field-by-field —
+ * no full re-extraction needed.
+ *
+ * Input: { documentType, text, googleDocId, blockIds?, regions? }
+ * Output: { encrypted, iv, tag, signature, schemaVersion, documentType, ... }
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { db } from "@/db";
-import { documents, documentExports } from "@/db/schema";
 import {
   encryptPayload,
   signPayload,
 } from "@glyph/crypto";
-import { getSchema, type DocumentType } from "@glyph/schema-library";
+import { type DocumentType } from "@glyph/schema-library";
 import { authenticateApiKey } from "@/lib/api-key-auth";
 import { extractHeuristic } from "@/lib/extract/heuristic";
+import { attachMeta, buildMeta } from "@/lib/payload-meta";
+import { isBuiltInType, resolveSchema } from "@/server/documentRegistry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const SUPPORTED_TYPES: readonly DocumentType[] = [
-  "contract",
-  "resume",
-  "invoice",
-];
 
 interface FinalizeInput {
   readonly documentType: string;
   readonly text: string;
   readonly googleDocId: string;
+  readonly blockIds?: readonly string[];
+  readonly regions?: Record<string, [number, number]>;
 }
 
 function err(
@@ -74,15 +77,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       "Body must contain documentType, text, googleDocId.",
     );
   }
-  if (!(SUPPORTED_TYPES as readonly string[]).includes(body.documentType)) {
+
+  let resolved: Awaited<ReturnType<typeof resolveSchema>>;
+  try {
+    resolved = await resolveSchema({
+      documentType: body.documentType,
+      blockIds: body.blockIds,
+      userId: auth.key.userId,
+    });
+  } catch {
     return err(400, "bad_request", `Unsupported documentType: ${body.documentType}`);
   }
 
-  const docType = body.documentType as DocumentType;
-  const result = extractHeuristic(docType, body.text);
+  const result = isBuiltInType(body.documentType)
+    ? extractHeuristic(body.documentType as DocumentType, body.text)
+    : {
+        extracted: { raw_text: body.text } as Record<string, unknown>,
+        missingFields: [] as string[],
+      };
 
-  const schema = getSchema(docType);
-  const parsed = schema.safeParse(result.extracted);
+  const parsed = resolved.zod.safeParse(result.extracted);
   if (!parsed.success) {
     return err(400, "validation_failed", "Heuristic extract does not match schema.", {
       issues: parsed.error.issues,
@@ -94,43 +108,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const schemaVersion =
     typeof data.schema_version === "string" ? data.schema_version : "1.0";
 
-  const encrypted = await encryptPayload(data);
+  const meta = buildMeta({
+    sourceText: body.text,
+    regions: body.regions ?? {},
+    schemaVersion,
+    blockIds: resolved.blockIds ?? null,
+    compositionId: resolved.compositionId ?? null,
+  });
+  const withMeta = attachMeta(data, meta);
+
+  const encrypted = await encryptPayload(withMeta);
   const signature = await signPayload(encrypted.encrypted);
 
-  // Best-effort persistence — failure must not break client embedding.
-  try {
-    const title = `GDoc ${body.googleDocId}`;
-    const [docRow] = await db
-      .insert(documents)
-      .values({
-        userId: auth.key.userId,
-        title,
-        documentType: docType,
-        documentTypeKey: docType,
-        schemaVersion,
-        validatedJson: data,
-        encryptedPayload: encrypted.encrypted,
-        payloadIv: encrypted.iv,
-        payloadTag: encrypted.tag,
-        payloadSignature: signature,
-        isFinalized: true,
-      })
-      .returning({ id: documents.id });
-
-    if (docRow !== undefined) {
-      await db.insert(documentExports).values({
-        documentId: docRow.id,
-        userId: auth.key.userId,
-        format: "gdocs",
-        gdocsFileId: body.googleDocId,
-      });
-    }
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.error("[gdocs/finalize] persistence error", {
-      message: e instanceof Error ? e.message : "unknown",
-    });
-  }
+  // No DB persistence: the Google Doc's Document Properties hold the
+  // encrypted payload. Keeping plaintext validated JSON in Postgres would
+  // be a data-leak surface for no benefit.
 
   return NextResponse.json(
     {
@@ -139,7 +131,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       tag: encrypted.tag,
       signature,
       schemaVersion,
-      documentType: docType,
+      documentType: body.documentType,
+      compositionId: resolved.compositionId,
+      blockIds: resolved.blockIds,
     },
     { status: 200 },
   );

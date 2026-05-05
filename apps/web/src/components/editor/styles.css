@@ -77,6 +77,23 @@
   outline: none;
 }
 
+/* Extracted field inline highlights — colors from data-color index */
+.glyph-extract-highlight {
+  border-radius: 3px;
+  padding: 1px 2px;
+  transition: background 0.15s ease, outline 0.15s ease;
+  cursor: default;
+}
+.glyph-extract-highlight[data-color="0"] { background: rgba(139,92,246,0.12); outline: 1px solid rgba(139,92,246,0.30); }
+.glyph-extract-highlight[data-color="1"] { background: rgba(14,165,233,0.12); outline: 1px solid rgba(14,165,233,0.30); }
+.glyph-extract-highlight[data-color="2"] { background: rgba(245,158,11,0.12); outline: 1px solid rgba(245,158,11,0.30); }
+.glyph-extract-highlight[data-color="3"] { background: rgba(16,185,129,0.12); outline: 1px solid rgba(16,185,129,0.30); }
+.glyph-extract-highlight[data-color="4"] { background: rgba(244,63,94,0.12);  outline: 1px solid rgba(244,63,94,0.30);  }
+.glyph-extract-highlight[data-color="5"] { background: rgba(249,115,22,0.12); outline: 1px solid rgba(249,115,22,0.30); }
+.glyph-extract-highlight[data-color="6"] { background: rgba(20,184,166,0.12); outline: 1px solid rgba(20,184,166,0.30); }
+.glyph-extract-highlight[data-color="7"] { background: rgba(99,102,241,0.12); outline: 1px solid rgba(99,102,241,0.30); }
+.glyph-extract-highlight:hover { filter: brightness(0.92); outline-width: 2px; }
+
 /* Validation indicator chips in the sidebar. */
 .glyph-validation-chip {
   display: inline-flex;

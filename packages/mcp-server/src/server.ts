@@ -3,11 +3,25 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { structureTool, structureHandler } from './tools/structure.js';
-import { validateTool, validateHandler } from './tools/validate.js';
+import {
+  structureTool,
+  structureHandler,
+  type StructureDeps,
+} from './tools/structure.js';
+import { validateTool, validateHandler, type ValidateDeps } from './tools/validate.js';
 import { generateTool, generateHandler, type GenerateDeps } from './tools/generate.js';
+import { readPayloadTool, readPayloadHandler } from './tools/readPayload.js';
+import {
+  discoverSchemaTool,
+  discoverSchemaHandler,
+  type DiscoverSchemaDeps,
+} from './tools/discoverSchema.js';
 
-export interface CreateServerDeps extends GenerateDeps {
+export interface CreateServerDeps
+  extends GenerateDeps,
+    StructureDeps,
+    ValidateDeps,
+    DiscoverSchemaDeps {
   readonly glyphApiUrl: string;
 }
 
@@ -16,7 +30,13 @@ export interface CreateServerDeps extends GenerateDeps {
  * registration without driving the SDK transport.
  */
 export function listTools() {
-  return [structureTool, validateTool, generateTool];
+  return [
+    structureTool,
+    validateTool,
+    generateTool,
+    readPayloadTool,
+    discoverSchemaTool,
+  ];
 }
 
 export async function dispatchToolCall(
@@ -26,11 +46,24 @@ export async function dispatchToolCall(
 ) {
   switch (name) {
     case 'structure_document':
-      return structureHandler(args);
+      return structureHandler(args, {
+        glyphApiUrl: deps.glyphApiUrl,
+        fetch: deps.fetch,
+      });
     case 'validate_document':
-      return validateHandler(args);
+      return validateHandler(args, { glyphApiUrl: deps.glyphApiUrl, fetch: deps.fetch });
     case 'generate_structured_document':
       return generateHandler(args, deps);
+    case 'read_glyph_payload':
+      return readPayloadHandler(args, {
+        fetch: deps.fetch,
+        glyphApiUrl: deps.glyphApiUrl,
+      });
+    case 'discover_schema':
+      return discoverSchemaHandler(args, {
+        glyphApiUrl: deps.glyphApiUrl,
+        fetch: deps.fetch,
+      });
     default:
       return {
         isError: true,
@@ -41,7 +74,7 @@ export async function dispatchToolCall(
 
 export function createServer(deps: CreateServerDeps): Server {
   const server = new Server(
-    { name: 'glyph', version: '0.1.0' },
+    { name: 'glyph-mcp', version: '0.3.0' },
     { capabilities: { tools: {} } },
   );
 

@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { NextConfig } from "next";
 
+
 const ContentSecurityPolicy = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
@@ -47,16 +48,6 @@ const nextConfig: NextConfig = {
         crypto: false,
       };
     }
-
-    // Per HF transformers.js guide: exclude the Node.js ONNX runtime from
-    // the browser bundle. The gliner worker uses onnxruntime-web instead.
-    config.resolve.alias = {
-      ...config.resolve.alias,
-      "onnxruntime-node$": false,
-      "onnxruntime-web/webgpu": path.join(__dirname, "src/stubs/onnxruntime-web-webgpu.mjs"),
-      "onnxruntime-web/webgl": path.join(__dirname, "src/stubs/onnxruntime-web-webgl.mjs"),
-    };
-
     return config;
   },
 };

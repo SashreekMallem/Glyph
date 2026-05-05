@@ -21,6 +21,18 @@ export interface GlyphXmpMetadata {
   readonly tag: string;
   readonly signature: string;
   readonly timestamp: string;
+  /**
+   * Optional pointer into `schema_compositions` — the resolved adaptive
+   * schema this document was authored against. Older documents predate
+   * the composition resolver and omit this field.
+   */
+  readonly compositionId?: string | null;
+  /**
+   * Optional comma-joined list of block ids. Always sorted (the
+   * fingerprint depends on order). Used by readers that want to revive
+   * the same schema without round-tripping through `compositionId`.
+   */
+  readonly blockIds?: readonly string[] | null;
 }
 
 /**
@@ -38,7 +50,7 @@ export function escapeXmlAttr(value: string): string {
 
 /** Build the full XMP packet for a set of Glyph metadata fields. */
 export function buildGlyphXmpPacket(meta: GlyphXmpMetadata): string {
-  const attrs: readonly [string, string][] = [
+  const attrs: [string, string][] = [
     ["glyph:DocumentType", meta.documentType],
     ["glyph:SchemaVersion", meta.schemaVersion],
     ["glyph:EncryptedPayload", meta.encrypted],
@@ -47,6 +59,16 @@ export function buildGlyphXmpPacket(meta: GlyphXmpMetadata): string {
     ["glyph:Signature", meta.signature],
     ["glyph:Timestamp", meta.timestamp],
   ];
+  if (meta.compositionId !== undefined && meta.compositionId !== null) {
+    attrs.push(["glyph:CompositionId", meta.compositionId]);
+  }
+  if (
+    meta.blockIds !== undefined &&
+    meta.blockIds !== null &&
+    meta.blockIds.length > 0
+  ) {
+    attrs.push(["glyph:BlockIds", meta.blockIds.join(",")]);
+  }
   const attrLines = attrs
     .map(([k, v]) => `      ${k}="${escapeXmlAttr(v)}"`)
     .join("\n");
@@ -107,6 +129,12 @@ export function parseGlyphXmpPacket(xml: string): GlyphXmpMetadata | null {
   ) {
     return null;
   }
+  const compositionId = readGlyphAttr(xml, "CompositionId");
+  const blockIdsRaw = readGlyphAttr(xml, "BlockIds");
+  const blockIds =
+    blockIdsRaw === null || blockIdsRaw.length === 0
+      ? null
+      : blockIdsRaw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
   return {
     documentType,
     schemaVersion,
@@ -115,5 +143,7 @@ export function parseGlyphXmpPacket(xml: string): GlyphXmpMetadata | null {
     tag,
     signature,
     timestamp,
+    compositionId,
+    blockIds,
   };
 }

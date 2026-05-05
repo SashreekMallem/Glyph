@@ -8,12 +8,14 @@ import { FinalizeButton } from './components/FinalizeButton';
 import { useDocumentText } from './hooks/useDocumentText';
 import { useValidation } from './hooks/useValidation';
 import { useFinalize } from './hooks/useFinalize';
+import { useSync } from './hooks/useSync';
 
 export function App(): JSX.Element {
   const [documentType, setDocumentType] = useState<DocumentType | null>(null);
   const { text, refresh, error: readError } = useDocumentText();
   const validation = useValidation(documentType, text);
   const finalize = useFinalize();
+  const sync = useSync();
 
   // Refresh text when the user picks a type so validation sees the latest body.
   useEffect(() => {
@@ -25,7 +27,10 @@ export function App(): JSX.Element {
   const onFinalize = useCallback(async (): Promise<void> => {
     if (documentType === null) return;
     await finalize.run({ documentType, text });
-  }, [documentType, text, finalize]);
+    // After finalize, run sync so the just-signed bytes pass back through
+    // drift detection — usually a no-op, but keeps the file authoritative.
+    await sync.runSync();
+  }, [documentType, text, finalize, sync]);
 
   const canFinalize =
     documentType !== null &&

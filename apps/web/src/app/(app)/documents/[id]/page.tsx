@@ -140,6 +140,8 @@ export default function DocumentPage({
             {typeSupported ? (
               <Editor
                 documentType={docType}
+                docId={doc.id}
+                schemaVersion={doc.schemaVersion}
                 onSave={handleSave}
                 onValidation={setValidation}
               />

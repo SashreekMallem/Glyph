@@ -24,7 +24,17 @@ export interface DocumentDTO {
 
 export function toDocumentDTO(
   doc: Document,
-  opts: { includeValidatedJson?: boolean } = {},
+  opts: {
+    includeValidatedJson?: boolean;
+    /**
+     * Already-decrypted plaintext for the at-rest-encrypted columns.
+     * The router decrypts before calling this so the DTO stays
+     * shape-compatible with the client (which expects plaintext to
+     * render the editor). When omitted, both fields are `null`/absent.
+     */
+    prosemirrorState?: unknown;
+    validatedJson?: unknown;
+  } = {},
 ): DocumentDTO {
   const dto: DocumentDTO = {
     id: doc.id,
@@ -32,13 +42,13 @@ export function toDocumentDTO(
     title: doc.title,
     documentType: doc.documentType,
     schemaVersion: doc.schemaVersion,
-    prosemirrorState: doc.prosemirrorState,
+    prosemirrorState: opts.prosemirrorState ?? null,
     isFinalized: doc.isFinalized,
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
   };
   if (opts.includeValidatedJson && !doc.isFinalized) {
-    dto.validatedJson = doc.validatedJson;
+    dto.validatedJson = opts.validatedJson ?? null;
   }
   return dto;
 }

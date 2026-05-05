@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { httpBatchLink } from "@trpc/client";
 import superjson from "superjson";
+import { ThemeProvider } from "next-themes";
 import { useState, type ReactNode } from "react";
 
 import { trpc } from "@/lib/trpc";
@@ -31,7 +32,14 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <trpc.Provider client={trpcClient} queryClient={queryClient}>
       <QueryClientProvider client={queryClient}>
-        <MotionProvider>{children}</MotionProvider>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange={false}
+        >
+          <MotionProvider>{children}</MotionProvider>
+        </ThemeProvider>
       </QueryClientProvider>
     </trpc.Provider>
   );

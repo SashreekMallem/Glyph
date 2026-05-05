@@ -12,6 +12,7 @@
  */
 
 import { useMemo } from "react";
+import { isBuiltInDocumentType } from "@glyph/schema-library";
 import { trpc } from "@/lib/trpc";
 import {
   descriptorsFor,
@@ -19,11 +20,7 @@ import {
 } from "@/components/editor/descriptors";
 import type { FieldDescriptor } from "@/lib/editor/serialize";
 
-const BUILT_INS = new Set<DocType>(["contract", "resume", "invoice"]);
-
-function isBuiltIn(k: string): k is DocType {
-  return BUILT_INS.has(k as DocType);
-}
+const isBuiltIn = (k: string): k is DocType => isBuiltInDocumentType(k);
 
 export interface UseDocumentDescriptorsResult {
   readonly descriptors: FieldDescriptor[];

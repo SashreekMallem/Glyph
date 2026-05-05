@@ -28,6 +28,7 @@
     "@glyph/crypto": "workspace:*",
     "@glyph/schema-library": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.4",
+    "fflate": "^0.8.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {

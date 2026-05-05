@@ -14,6 +14,13 @@ export type GlyphDocument = z.infer<typeof DocumentSchema>;
 
 export type DocumentType = 'contract' | 'resume' | 'invoice';
 
+const BUILT_IN_KEYS: ReadonlySet<string> = new Set(['contract', 'resume', 'invoice']);
+
+/** Returns true if the given string is one of the three built-in document types. */
+export function isBuiltInDocumentType(type: string): type is DocumentType {
+  return BUILT_IN_KEYS.has(type);
+}
+
 const REGISTRY = {
   contract: ContractSchema,
   resume: ResumeSchema,

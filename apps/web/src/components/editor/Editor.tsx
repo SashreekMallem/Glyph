@@ -17,23 +17,25 @@ import {
   validationPlugin,
   type ValidationReport,
 } from "./plugins/validation";
-import {
-  glinerExtractorPlugin,
-  type GlinerExtractReport,
-} from "./plugins/gliner-extractor";
+import { extractPlugin } from "./plugins/extract";
+import { extractDecorationsPlugin } from "./plugins/decorations";
 import { descriptorsFor, type DocType } from "./descriptors";
 import { typeMapFor } from "./descriptors";
 import { docToJson } from "@/lib/editor/serialize";
 import { useDocumentDescriptors } from "./hooks/useDocumentDescriptors";
+import { ExtractedFieldsPanel } from "./ExtractedFieldsPanel";
 
 import "./styles.css";
 
 export interface EditorProps {
   readonly documentType: DocType;
+  readonly docId?: string;
+  readonly schemaVersion?: string;
   readonly initialJson?: Record<string, unknown>;
   readonly onSave?: (json: Record<string, unknown>) => void;
   readonly onValidation?: (report: ValidationReport) => void;
-  readonly onExtract?: (reports: readonly GlinerExtractReport[]) => void;
+  readonly onExtract?: (ease: Record<string, unknown>) => void;
+  readonly onExtractError?: (message: string) => void;
 }
 
 /**
@@ -49,16 +51,30 @@ function emptyDoc() {
 
 export function Editor({
   documentType,
+  docId,
+  schemaVersion,
   onSave,
   onValidation,
   onExtract,
+  onExtractError,
 }: EditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(
     null,
   ) as RefObject<HTMLDivElement>;
   const viewRef = useRef<EditorView | null>(null);
   const [report, setReport] = useState<ValidationReport | null>(null);
-  const [extracted, setExtracted] = useState<GlinerExtractReport[]>([]);
+  const [extracted, setExtracted] = useState<Record<string, unknown> | null>(
+    null,
+  );
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [activeField, setActiveField] = useState<string | null>(null);
+  const streamingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (streamingTimerRef.current) clearTimeout(streamingTimerRef.current);
+    };
+  }, []);
 
   const fromDb = useDocumentDescriptors(documentType);
   const descriptors = useMemo(
@@ -70,41 +86,61 @@ export function Editor({
   );
   const typeMap = useMemo(() => typeMapFor(descriptors), [descriptors]);
 
-  const { labelToPath, candidateLabels } = useMemo(() => {
-    const m: Record<string, string> = {};
-    for (const d of descriptors) {
-      if (d.path && d.label) m[d.label] = d.path;
-    }
-    return {
-      labelToPath: m,
-      candidateLabels: Object.keys(m),
-    };
-  }, [descriptors]);
-
   useEffect(() => {
     if (!hostRef.current) return;
+
+    const plugins = [
+      ...editorCommands(),
+      autoSavePlugin((d) => {
+        if (onSave) onSave(docToJson(d, typeMap));
+      }),
+      validationPlugin(documentType, descriptors, (r) => {
+        setReport(r);
+        if (onValidation) onValidation(r);
+      }),
+    ];
+
+    if (docId) {
+      // Schema is resolved server-side; the plugin runs without a local
+      // zod validator and skips client-side patch validation.
+      const extractPluginInstance = extractPlugin({
+        docId,
+        schemaType: documentType,
+        schemaJson: undefined,
+        schemaVersion: schemaVersion ?? "v1",
+        onStateChange: (ease) => {
+          const next = ease as Record<string, unknown>;
+          setExtracted(next);
+          setIsStreaming(true);
+          if (streamingTimerRef.current) {
+            clearTimeout(streamingTimerRef.current);
+          }
+          streamingTimerRef.current = setTimeout(() => {
+            setIsStreaming(false);
+          }, 500);
+          if (onExtract) onExtract(next);
+        },
+        onError: (err) => {
+          if (onExtractError) onExtractError(err.message);
+        },
+      });
+      plugins.push(extractPluginInstance);
+      plugins.push(
+        extractDecorationsPlugin({
+          getEase: (s) => {
+            const pluginState = extractPluginInstance.getState(s) as
+              | { ease?: Record<string, unknown> }
+              | undefined;
+            return pluginState?.ease ?? null;
+          },
+        }),
+      );
+    }
 
     const state = EditorState.create({
       schema: editorSchema,
       doc: emptyDoc(),
-      plugins: [
-        ...editorCommands(),
-        autoSavePlugin((d) => {
-          if (onSave) onSave(docToJson(d, typeMap));
-        }),
-        validationPlugin(documentType, descriptors, (r) => {
-          setReport(r);
-          if (onValidation) onValidation(r);
-        }),
-        glinerExtractorPlugin({
-          labelToPath,
-          candidateLabels,
-          onExtractUpdate: (reports) => {
-            setExtracted([...reports]);
-            if (onExtract) onExtract(reports);
-          },
-        }),
-      ],
+      plugins,
     });
 
     const view = new EditorView(hostRef.current, { state });
@@ -118,75 +154,46 @@ export function Editor({
   }, [documentType]);
 
   return (
-    <div className="flex gap-8">
-      <div className="flex-1">
+    <div className="flex gap-6">
+      {/* Editor surface */}
+      <div className="flex-1 min-w-0">
         <div ref={hostRef} className="glyph-editor" />
-        <p className="mt-4 text-xs text-neutral-400">
-          Start typing. The in-browser classifier watches your prose and
-          auto-tags each line once it&apos;s confident what it is.
-        </p>
       </div>
-      <aside className="sticky top-6 h-fit w-64 shrink-0 space-y-5 py-6 text-xs text-neutral-500">
-        <div>
-          <div className="mb-2 font-sans text-[0.68rem] uppercase tracking-[0.18em] text-neutral-400">
-            Validation
-          </div>
-          {report === null ? (
-            <div>Waiting for input…</div>
-          ) : report.valid ? (
-            <span className="glyph-validation-chip" data-kind="valid">
-              ✓ Valid
-            </span>
-          ) : "drafting" in report && report.drafting ? (
-            <div className="text-neutral-400">
-              Drafting… keep typing. Fields will appear here as the classifier
-              tags them.
-            </div>
-          ) : "errors" in report ? (
-            <div className="space-y-1.5">
-              <span className="glyph-validation-chip" data-kind="invalid">
-                ✗ {report.errors.length} issue
-                {report.errors.length === 1 ? "" : "s"}
-              </span>
-              <ul className="mt-2 space-y-1">
-                {report.errors.slice(0, 6).map((e, i) => (
-                  <li key={i} className="leading-tight">
-                    <span className="font-mono text-neutral-400">
-                      {e.path || "(root)"}
-                    </span>
-                    <br />
-                    <span>{e.message}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </div>
 
-        {extracted.length > 0 && (
-          <div>
-            <div className="mb-2 font-sans text-[0.68rem] uppercase tracking-[0.18em] text-neutral-400">
-              Detected
-            </div>
-            <ul className="space-y-1.5">
-              {[...extracted]
-                .sort((a, b) => b.confidence - a.confidence)
-                .map((e, i) => (
-                  <li key={`${e.from}-${e.label}-${i}`} className="leading-tight">
-                    <span className="font-mono text-[0.7rem] text-neutral-900">
-                      {e.label}
-                    </span>{" "}
-                    <span className="text-neutral-400">
-                      ({Math.round(e.confidence * 100)}%)
-                    </span>
-                    <div className="text-[0.7rem] text-neutral-500">
-                      “{e.text}”
-                    </div>
-                  </li>
-                ))}
-            </ul>
+      {/* Extracted fields panel */}
+      <aside className="sticky top-6 h-fit w-72 shrink-0 space-y-4 py-2">
+        {/* Validation strip */}
+        {report !== null && (
+          <div className="rounded-lg border border-neutral-200 bg-white px-3 py-2">
+            {report.valid ? (
+              <span className="glyph-validation-chip" data-kind="valid">✓ Valid</span>
+            ) : "drafting" in report && report.drafting ? (
+              <p className="text-[0.68rem] text-neutral-400">Drafting…</p>
+            ) : "errors" in report ? (
+              <div className="space-y-1">
+                <span className="glyph-validation-chip" data-kind="invalid">
+                  ✗ {report.errors.length} issue{report.errors.length === 1 ? "" : "s"}
+                </span>
+                <ul className="mt-1.5 space-y-1 text-[0.68rem]">
+                  {report.errors.slice(0, 4).map((e, i) => (
+                    <li key={i} className="leading-tight text-neutral-600">
+                      <span className="font-mono text-neutral-400">{e.path || "(root)"}</span>
+                      {" "}{e.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
         )}
+
+        {/* Extracted fields */}
+        <ExtractedFieldsPanel
+          ease={extracted}
+          isStreaming={isStreaming}
+          activeField={activeField}
+          onFieldHover={setActiveField}
+        />
       </aside>
     </div>
   );

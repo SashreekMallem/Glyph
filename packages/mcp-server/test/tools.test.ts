@@ -33,6 +33,58 @@ Total: $1500.00`,
     // Might still fail line_items min(1); acceptable — we just assert result shape is valid JSON
     expect(r.content[0]?.text).toBeDefined();
   });
+
+  it('delegates to /api/v1/extract when api_key + glyphApiUrl are present', async () => {
+    const fakeData = {
+      document_type: 'resume',
+      schema_version: '1.0',
+      full_name: 'Ada Lovelace',
+    };
+    const mockFetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      // Assert wire shape: bearer auth, JSON body with raw_text + document_type.
+      expect(String(url)).toBe('https://glyph.dev/api/v1/extract');
+      expect((init?.headers as Record<string, string>).Authorization).toBe(
+        'Bearer sk_live_abc',
+      );
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      expect(body.document_type).toBe('resume');
+      expect(typeof body.raw_text).toBe('string');
+      return new Response(JSON.stringify({ data: fakeData }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const r = await structureHandler(
+      {
+        document_type: 'resume',
+        raw_text: 'Ada Lovelace, mathematician with email ada@example.com',
+        api_key: 'sk_live_abc',
+      },
+      {
+        glyphApiUrl: 'https://glyph.dev',
+        fetch: mockFetch as unknown as typeof fetch,
+      },
+    );
+    expect(r.isError).toBeUndefined();
+    expect(JSON.parse(r.content[0]!.text)).toEqual(fakeData);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns isError when /api/v1/extract returns non-2xx', async () => {
+    const mockFetch = vi.fn(async () => new Response('nope', { status: 502 }));
+    const r = await structureHandler(
+      {
+        document_type: 'resume',
+        raw_text: 'Ada Lovelace, mathematician with email ada@example.com',
+        api_key: 'sk_live_abc',
+      },
+      {
+        glyphApiUrl: 'https://glyph.dev',
+        fetch: mockFetch as unknown as typeof fetch,
+      },
+    );
+    expect(r.isError).toBe(true);
+  });
 });
 
 describe('validateHandler', () => {

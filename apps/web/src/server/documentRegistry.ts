@@ -12,21 +12,27 @@
  * for the duration of a request.
  */
 
-import { eq } from "drizzle-orm";
+import { eq, sql as dsql } from "drizzle-orm";
 import type { ZodTypeAny } from "zod";
 import {
   getSchema as getBuiltInSchema,
+  isBuiltInDocumentType,
   jsonSchemaToZod,
-  type DocumentType as BuiltInDocumentType,
+  toJsonSchema,
 } from "@glyph/schema-library";
 
 import { db } from "@/db";
 import {
   documentTemplates,
   documentTypes,
+  schemaBlocks,
   type DocumentTemplate,
   type DocumentTypeRow,
 } from "@/db/schema";
+import {
+  defaultCompositionForDomain,
+  resolveComposition,
+} from "@/server/composition";
 
 export interface FieldDescriptor {
   readonly path: string;
@@ -36,11 +42,11 @@ export interface FieldDescriptor {
   readonly placeholder?: string;
 }
 
-const BUILT_INS: ReadonlySet<string> = new Set(["contract", "resume", "invoice"]);
-
-export function isBuiltInType(key: string): key is BuiltInDocumentType {
-  return BUILT_INS.has(key);
-}
+/**
+ * Re-export the canonical built-in check from `@glyph/schema-library` so
+ * server code has one place to import from. Avoid duplicating the set.
+ */
+export const isBuiltInType = isBuiltInDocumentType;
 
 export async function getTypeRow(key: string): Promise<DocumentTypeRow | null> {
   const [row] = await db
@@ -51,22 +57,115 @@ export async function getTypeRow(key: string): Promise<DocumentTypeRow | null> {
   return row ?? null;
 }
 
+export interface ResolvedSchema {
+  readonly zod: ZodTypeAny;
+  readonly jsonSchema: Record<string, unknown> | null;
+  readonly compositionId: string | null;
+  readonly blockIds: readonly string[] | null;
+  readonly source: "blocks" | "custom_type" | "builtin";
+}
+
 /**
- * Return the Zod validator for a document type by key. For built-ins
- * this is the compile-time schema; for custom types it is derived from
- * `documentTypes.jsonSchema`.
+ * Resolves a document schema across all four modes:
+ *   1. blocks: caller passes explicit `blockIds` -> resolveComposition.
+ *   2. blocks-default: caller passes only `documentType` and that domain
+ *      has REQUIRED blocks registered -> defaultCompositionForDomain.
+ *   3. custom_type: domain has no blocks but exists in `documentTypes`.
+ *   4. builtin: compile-time Zod for resume / contract / invoice
+ *      (last resort — should rarely trigger because all three are
+ *      seeded into `schema_blocks`).
  *
- * Throws if no row exists and the key isn't a built-in.
+ * Throws on unknown document types.
+ */
+export async function resolveSchema(args: {
+  documentType: string;
+  blockIds?: readonly string[];
+  userId?: string;
+}): Promise<ResolvedSchema> {
+  const { documentType, blockIds, userId } = args;
+
+  // 1. Explicit block ids.
+  if (blockIds && blockIds.length > 0) {
+    const composed = await resolveComposition({
+      domain: documentType,
+      blockIds,
+      userId,
+    });
+    return {
+      zod: composed.zod,
+      jsonSchema: composed.jsonSchema,
+      compositionId: composed.compositionId,
+      blockIds: composed.blockIds,
+      source: "blocks",
+    };
+  }
+
+  // 2. Default composition from REQUIRED blocks for the domain.
+  const blockCountRows = await db
+    .select({ c: dsql<number>`count(*)::int` })
+    .from(schemaBlocks)
+    .where(eq(schemaBlocks.domain, documentType));
+  const blockCount = blockCountRows[0]?.c ?? 0;
+  if (blockCount > 0) {
+    try {
+      const composed = await defaultCompositionForDomain(documentType, userId);
+      return {
+        zod: composed.zod,
+        jsonSchema: composed.jsonSchema,
+        compositionId: composed.compositionId,
+        blockIds: composed.blockIds,
+        source: "blocks",
+      };
+    } catch {
+      // No required blocks — fall through to custom_type / builtin.
+    }
+  }
+
+  // 3. Custom user-registered type.
+  const row = await getTypeRow(documentType);
+  if (row !== null) {
+    const json = row.jsonSchema as Record<string, unknown>;
+    return {
+      zod: jsonSchemaToZod(json as Parameters<typeof jsonSchemaToZod>[0]),
+      jsonSchema: json,
+      compositionId: null,
+      blockIds: null,
+      source: "custom_type",
+    };
+  }
+
+  // 4. Built-in compile-time schema.
+  if (isBuiltInType(documentType)) {
+    const zod = getBuiltInSchema(documentType) as ZodTypeAny;
+    let jsonSchema: Record<string, unknown> | null = null;
+    try {
+      jsonSchema = toJsonSchema(zod) as Record<string, unknown>;
+    } catch {
+      jsonSchema = null;
+    }
+    return {
+      zod,
+      jsonSchema,
+      compositionId: null,
+      blockIds: null,
+      source: "builtin",
+    };
+  }
+
+  throw new Error(`Unknown document type: ${documentType}`);
+}
+
+/**
+ * Return the Zod validator for a document type by key.
+ *
+ * Backwards-compatible wrapper around {@link resolveSchema}: it calls
+ * the new resolver without `blockIds` so the default composition is used
+ * when one exists, otherwise falls back to the custom_type / built-in
+ * paths. Existing callers continue to work unchanged.
  */
 export async function getValidatorForType(key: string): Promise<ZodTypeAny> {
-  if (isBuiltInType(key)) {
-    return getBuiltInSchema(key) as ZodTypeAny;
-  }
-  const row = await getTypeRow(key);
-  if (row === null) {
-    throw new Error(`Unknown document type: ${key}`);
-  }
-  return jsonSchemaToZod(row.jsonSchema as Parameters<typeof jsonSchemaToZod>[0]);
+  const resolved = await resolveSchema({ documentType: key });
+  return resolved.zod;
 }
 
 /**

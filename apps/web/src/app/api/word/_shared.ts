@@ -1,11 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z, type ZodIssue } from "zod";
 
-import type { DocumentType } from "@glyph/schema-library";
-import { getSchema } from "@glyph/schema-library";
-
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { extractHeuristic } from "@/lib/extract/heuristic";
+import {
+  isBuiltInType,
+  resolveSchema,
+  type ResolvedSchema,
+} from "@/server/documentRegistry";
 
 /** Origins the plugin may legitimately load from. */
 const ALLOWED_ORIGINS: ReadonlySet<string> = new Set([
@@ -51,14 +53,26 @@ export function jsonWithCors(
   return NextResponse.json(body, { status, headers: corsHeaders(origin) });
 }
 
+const RegionTuple = z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]);
+
 const BodySchema = z.object({
-  documentType: z.enum(["contract", "resume", "invoice"]),
+  documentType: z.string().min(1),
   text: z.string().min(1),
+  blockIds: z.array(z.string()).optional(),
+  /**
+   * Optional: plugin-provided per-leaf field regions (dot-notation
+   * path → `[start, end)` offsets into `text`). When present we sign
+   * fingerprints into the payload so the sync endpoint can detect
+   * field-level drift on later reads.
+   */
+  regions: z.record(z.string(), RegionTuple).optional(),
 });
 
 export interface ParsedBody {
-  readonly documentType: DocumentType;
+  readonly documentType: string;
   readonly text: string;
+  readonly blockIds?: readonly string[];
+  readonly regions?: Record<string, [number, number]>;
 }
 
 export async function parseBody(
@@ -78,7 +92,12 @@ export async function parseBody(
       400,
     );
   }
-  return { documentType: parsed.data.documentType, text: parsed.data.text };
+  return {
+    documentType: parsed.data.documentType,
+    text: parsed.data.text,
+    blockIds: parsed.data.blockIds,
+    regions: parsed.data.regions as Record<string, [number, number]> | undefined,
+  };
 }
 
 /**
@@ -102,15 +121,32 @@ export interface ValidationOutcome {
   readonly errors: ReadonlyArray<Pick<ZodIssue, "path" | "message" | "code">>;
   readonly valid: boolean;
   readonly data: unknown | null;
+  readonly resolved: ResolvedSchema | null;
 }
 
-/** Shared validation pipeline: extract heuristically, then Zod-parse. */
-export function runValidation(body: ParsedBody): ValidationOutcome {
-  const { extracted } = extractHeuristic(body.documentType, body.text);
-  const schema = getSchema(body.documentType);
-  const parsed = schema.safeParse(extracted);
+/** Shared validation pipeline: extract heuristically, then Zod-parse.
+ *  For built-in types the heuristic extractor runs first; for custom types
+ *  the raw text is passed as-is (structured_data should come from the caller).
+ *  Schema resolution supports blocks/compositions, custom types, and built-ins.
+ */
+export async function runValidation(body: ParsedBody): Promise<ValidationOutcome> {
+  const extracted = isBuiltInType(body.documentType)
+    ? extractHeuristic(body.documentType, body.text).extracted
+    : ({ raw_text: body.text } as Record<string, unknown>);
+
+  let resolved: ResolvedSchema;
+  try {
+    resolved = await resolveSchema({
+      documentType: body.documentType,
+      blockIds: body.blockIds,
+    });
+  } catch {
+    return { extracted, errors: [], valid: false, data: null, resolved: null };
+  }
+
+  const parsed = resolved.zod.safeParse(extracted);
   if (parsed.success) {
-    return { extracted, errors: [], valid: true, data: parsed.data };
+    return { extracted, errors: [], valid: true, data: parsed.data, resolved };
   }
   return {
     extracted,
@@ -121,5 +157,6 @@ export function runValidation(body: ParsedBody): ValidationOutcome {
     })),
     valid: false,
     data: null,
+    resolved,
   };
 }

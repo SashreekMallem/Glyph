@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
   const body = await parseBody(req);
   if (body instanceof Response) return body;
 
-  const outcome = runValidation(body);
+  const outcome = await runValidation(body);
   return jsonWithCors(req, {
     extracted: outcome.extracted,
     errors: outcome.errors,

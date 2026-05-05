@@ -10,23 +10,20 @@ import {
   verifySignature,
   DecryptionError,
 } from "@glyph/crypto";
-import {
-  getSchema,
-  toJsonSchema,
-  type DocumentType,
-} from "@glyph/schema-library";
+import { type DocumentType } from "@glyph/schema-library";
 import { getExtractLimiter } from "@/lib/extract-ratelimit";
 import { extractXmp } from "@/lib/pdf";
+import {
+  extractOneShot,
+  OneShotExtractError,
+} from "@/lib/extract/oneshot";
+import { SchemaNotFoundError } from "@/lib/extract/resolve-schema";
+import { resolveSchema } from "@/server/documentRegistry";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const API_KEY_PREFIX_LEN = 16;
-const SUPPORTED_TYPES: readonly DocumentType[] = [
-  "contract",
-  "resume",
-  "invoice",
-];
 
 interface JsonExtractInput {
   readonly encrypted: string;
@@ -34,6 +31,24 @@ interface JsonExtractInput {
   readonly tag: string;
   readonly signature: string;
   readonly document_type: string;
+  readonly block_ids?: readonly string[];
+}
+
+interface RawTextExtractInput {
+  readonly raw_text: string;
+  readonly document_type: string;
+  readonly block_ids?: readonly string[];
+}
+
+function isRawTextExtractInput(v: unknown): v is RawTextExtractInput {
+  if (v === null || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.raw_text === "string" &&
+    o.raw_text.length > 0 &&
+    typeof o.document_type === "string" &&
+    typeof (o as { encrypted?: unknown }).encrypted !== "string"
+  );
 }
 
 function err(
@@ -162,6 +177,77 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       } catch {
         return err(400, "bad_request", "Body is not valid JSON.");
       }
+
+      // New raw-text branch: invoke the LLM extraction pipeline.
+      // Preserves backwards compat — only triggered when the body lacks the
+      // encrypted-payload fields and includes `raw_text`.
+      if (isRawTextExtractInput(body)) {
+        documentType = body.document_type;
+        try {
+          const oneshot = await extractOneShot({
+            text: body.raw_text,
+            typeKey: documentType,
+            userId: keyRecord.userId,
+            db: db as never,
+          });
+          // Best-effort usage bookkeeping (mirrors the encrypted path).
+          try {
+            await db.insert(apiUsage).values({
+              apiKeyId: keyRecord.id,
+              documentType: documentType as DocumentType,
+            });
+            await db
+              .update(apiKeys)
+              .set({
+                requestCount: sql`${apiKeys.requestCount} + 1`,
+                lastUsedAt: new Date(),
+              })
+              .where(eq(apiKeys.id, keyRecord.id));
+          } catch {
+            // Never leak bookkeeping failures.
+          }
+          // Validate against the resolved schema for parity with the
+          // encrypted path (the extract pipeline already conforms, but
+          // we want the public response shape to be identical).
+          let jsonSchema: unknown = null;
+          try {
+            const resolved = await resolveSchema({
+              documentType,
+              blockIds: body.block_ids,
+              userId: keyRecord.userId,
+            });
+            jsonSchema = resolved.jsonSchema;
+          } catch {
+            jsonSchema = null;
+          }
+          return NextResponse.json(
+            {
+              document_type: documentType,
+              schema_version:
+                (oneshot.json as { schema_version?: string })
+                  ?.schema_version ?? oneshot.schemaVersion,
+              data: oneshot.json,
+              json_schema: jsonSchema,
+              signature_valid: false,
+              extracted_at: new Date().toISOString(),
+            },
+            { status: 200 },
+          );
+        } catch (e) {
+          if (e instanceof SchemaNotFoundError) {
+            return err(
+              400,
+              "bad_request",
+              `Unsupported document_type: ${documentType}`,
+            );
+          }
+          if (e instanceof OneShotExtractError) {
+            return err(502, "extract_failed", "Upstream extraction failed.");
+          }
+          throw e;
+        }
+      }
+
       if (!isJsonExtractInput(body)) {
         return err(
           400,
@@ -180,7 +266,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     documentType = payload.document_type;
 
-    if (!(SUPPORTED_TYPES as readonly string[]).includes(documentType)) {
+    // Resolve schema (blocks-first, then custom_type, then built-in).
+    let resolvedSchema: Awaited<ReturnType<typeof resolveSchema>>;
+    try {
+      resolvedSchema = await resolveSchema({
+        documentType,
+        blockIds: payload.block_ids,
+        userId: keyRecord.userId,
+      });
+    } catch {
       return err(400, "bad_request", `Unsupported document_type: ${documentType}`);
     }
 
@@ -204,7 +298,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // 6. Validate schema
-    const schema = getSchema(documentType as DocumentType);
+    const schema = resolvedSchema.zod;
     const parsed = schema.safeParse(decrypted);
     if (!parsed.success) {
       return err(400, "validation_failed", "Payload does not match schema.", {
@@ -230,7 +324,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // 8. Response
-    const jsonSchema = toJsonSchema(schema);
+    const jsonSchema = resolvedSchema.jsonSchema;
 
     return NextResponse.json(
       {
