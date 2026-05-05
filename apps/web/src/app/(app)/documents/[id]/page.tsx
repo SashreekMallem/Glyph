@@ -70,13 +70,28 @@ export default function DocumentPage({
     },
   });
 
+  // Save the Tiptap document JSON to prosemirrorState.
   const handleChange = useCallback(
     (json: object) => {
       if (!doc) return;
       save.mutate({
         id: doc.id,
-        prosemirrorState: null,
-        validatedJson: json as Record<string, unknown>,
+        prosemirrorState: json,
+        validatedJson: extractedJson ?? (doc.validatedJson as Record<string, unknown> | null),
+      });
+    },
+    [doc, save, extractedJson],
+  );
+
+  // When extraction produces new structured JSON, persist it.
+  const handleExtracted = useCallback(
+    (json: Record<string, unknown>) => {
+      setExtractedJson(json);
+      if (!doc) return;
+      save.mutate({
+        id: doc.id,
+        prosemirrorState: doc.prosemirrorState,
+        validatedJson: json,
       });
     },
     [doc, save],
