@@ -4,6 +4,22 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "env": [
+        "NEXT_PUBLIC_SUPABASE_URL",
+        "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "DATABASE_URL",
+        "UPSTASH_REDIS_REST_URL",
+        "UPSTASH_REDIS_REST_TOKEN",
+        "ENCRYPTION_MASTER_KEY",
+        "SIGNING_PRIVATE_KEY",
+        "SIGNING_PUBLIC_KEY",
+        "MCP_SERVER_SECRET",
+        "GEMINI_API_KEY",
+        "GEMINI_MODEL",
+        "EXTRACT_USER_DAILY_USD_CAP",
+        "EXTRACT_DOC_USD_CAP"
+      ],
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
     "dev": {
