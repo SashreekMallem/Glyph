@@ -44,6 +44,8 @@ export type { ExtractedField } from "./FieldsPanel";
 import "./styles.css";
 
 export interface TiptapEditorProps {
+  /** Tiptap JSON doc to hydrate on mount. Takes priority over initialHtml. */
+  readonly initialContent?: object;
   readonly initialHtml?: string;
   readonly readOnly?: boolean;
   readonly placeholder?: string;
@@ -56,10 +58,15 @@ export interface TiptapEditorProps {
   /** Override the side-panel rail (use null to hide). */
   readonly sidePanel?: React.ReactNode | null;
   /**
+   * Called whenever the extraction pipeline produces a new decoded JSON
+   * object. Use this to persist the extracted structured data separately
+   * from the editor document state.
+   */
+  readonly onExtracted?: (json: Record<string, unknown>) => void;
+  /**
    * When set, the editor runs streaming Gemini extraction internally on
    * the editor's plain text and surfaces the resulting fields in the
-   * side panel. Each emitted field value is also auto-marked in the
-   * document with the GlyphFieldMark, so the side-panel jump-to works.
+   * side panel.
    */
   readonly extraction?: {
     readonly docId: string;
@@ -70,11 +77,13 @@ export interface TiptapEditorProps {
 const SAVE_DEBOUNCE_MS = 600;
 
 export function TiptapEditor({
+  initialContent,
   initialHtml,
   readOnly = false,
   placeholder = "Write a resume, contract, invoice — Glyph reads as you go.",
   onChange,
   onTransact,
+  onExtracted,
   fields: externalFields = [],
   sidePanel,
   extraction,
@@ -109,7 +118,8 @@ export function TiptapEditor({
         TableCell,
         GlyphFieldMark,
       ],
-      content: initialHtml ?? "",
+      // initialContent (Tiptap JSON) takes priority over initialHtml string.
+      content: initialContent ?? initialHtml ?? "",
       editable: !readOnly,
       editorProps: {
         attributes: {
@@ -155,6 +165,14 @@ export function TiptapEditor({
 
   const fields = extraction ? liveExtraction.fields : externalFields;
   const liveRegions = liveExtraction.regions;
+
+  // Notify parent whenever extraction produces new structured JSON.
+  const onExtractedRef = useRef(onExtracted);
+  onExtractedRef.current = onExtracted;
+  useEffect(() => {
+    if (!extraction || !liveExtraction.json) return;
+    onExtractedRef.current?.(liveExtraction.json as Record<string, unknown>);
+  }, [liveExtraction.json, extraction]);
 
   // Apply GlyphFieldMark for every value we just extracted. When the
   // model emitted source regions for a path, we use those byte offsets

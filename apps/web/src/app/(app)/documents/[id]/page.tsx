@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useCallback, useEffect, useMemo, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
@@ -28,11 +28,12 @@ export default function DocumentPage({
 
   const [title, setTitle] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
+  // Extracted JSON from Gemini — kept separate from the editor document.
+  const [extractedJson, setExtractedJson] = useState<Record<string, unknown> | null>(null);
 
-  const initialHtml = useMemo(() => {
-    if (!doc?.validatedJson) return "";
-    return jsonToInitialHtml(doc.validatedJson);
-  }, [doc?.validatedJson]);
+  // The Tiptap editor content is stored in prosemirrorState (encrypted).
+  // Cast it to object so Tiptap can hydrate directly — no HTML conversion.
+  const initialContent = doc?.prosemirrorState as object | undefined;
 
   useEffect(() => {
     if (doc) setTitle(doc.title);
@@ -143,8 +144,10 @@ export default function DocumentPage({
       <div className="grid grid-cols-1 gap-6">
         <FadeIn>
           <TiptapEditor
-            initialHtml={initialHtml}
+            initialContent={initialContent}
+            readOnly={doc.isFinalized}
             onChange={handleChange}
+            onExtracted={handleExtracted}
             extraction={{ docId: doc.id, schemaType: doc.documentType }}
           />
         </FadeIn>
@@ -212,59 +215,7 @@ export default function DocumentPage({
   );
 }
 
-// ---------------------------------------------------------------------------
-// jsonToInitialHtml — render previously saved validatedJson back into the
-// editor as paragraphs, so reopening a document shows your work. The full
-// round-trip (Tiptap JSON ⇄ Tiptap JSON) is wired separately when the
-// migration off the legacy editor is complete.
-// ---------------------------------------------------------------------------
 
-function jsonToInitialHtml(input: unknown): string {
-  if (!input || typeof input !== "object") return "";
-  const out: string[] = [];
-  walk(input as Record<string, unknown>, "", (path, value) => {
-    out.push(
-      `<p><strong>${escapeHtml(path)}:</strong> ${escapeHtml(String(value))}</p>`,
-    );
-  });
-  return out.join("");
-}
-
-function walk(
-  obj: Record<string, unknown>,
-  prefix: string,
-  emit: (path: string, value: string | number | boolean) => void,
-): void {
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === "_meta" || k === "__ease__" || k === "display_order") continue;
-    const path = prefix ? `${prefix}.${k}` : k;
-    if (v === null || v === undefined) continue;
-    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
-      emit(path, v);
-      continue;
-    }
-    if (Array.isArray(v)) {
-      v.forEach((item, i) => {
-        if (item && typeof item === "object" && !Array.isArray(item)) {
-          walk(item as Record<string, unknown>, `${path}.${i}`, emit);
-        } else if (item !== null && item !== undefined) {
-          emit(`${path}.${i}`, item as string | number | boolean);
-        }
-      });
-      continue;
-    }
-    if (typeof v === "object") {
-      walk(v as Record<string, unknown>, path, emit);
-    }
-  }
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
 
 // ---------------------------------------------------------------------------
 // extractIssues — pull the path+message issue list out of the tRPC zodError
