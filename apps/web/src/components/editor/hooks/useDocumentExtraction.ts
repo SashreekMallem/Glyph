@@ -106,19 +106,20 @@ export function useDocumentExtraction({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docId, schemaType, enabled]);
 
-  // Push the latest text into the client whenever it changes. The
-  // ExtractClient already debounces its own send; we use a lighter
-  // throttle here so we don't accumulate enormous deltas mid-typing.
-  const lastSentRef = useRef<string>("");
+  // Push the full text into the client whenever it changes.
+  // We always send fullText so the server does a clean re-extraction
+  // rather than trying to apply incremental deltas (which break on
+  // mid-document edits). The ExtractClient debounces internally.
   useEffect(() => {
     if (!enabled) return;
     const client = clientRef.current;
     if (!client) return;
+    // Skip trivially short text — not worth an LLM call.
+    if (text.trim().length < 10) return;
     const t = setTimeout(() => {
-      const prev = lastSentRef.current;
-      const delta = text.length > prev.length ? text.slice(prev.length) : text;
-      lastSentRef.current = text;
-      client.enqueueDelta(delta, text);
+      // Send full text as both delta and fullText — server will reset
+      // currentEase and do a fresh extraction when fullText is present.
+      client.enqueueDelta(text, text);
     }, DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [text, enabled]);

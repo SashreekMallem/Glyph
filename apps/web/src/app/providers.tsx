@@ -24,6 +24,11 @@ export function Providers({ children }: { children: ReactNode }) {
         httpBatchLink({
           url: "/api/trpc",
           transformer: superjson,
+          // Without this, the browser drops Supabase auth cookies on
+          // tRPC fetches and every protected procedure returns
+          // UNAUTHORIZED.
+          fetch: (input, init) =>
+            fetch(input, { ...init, credentials: "include" }),
         }),
       ],
     }),
