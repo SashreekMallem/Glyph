@@ -18,7 +18,7 @@ import {
   descriptorsFor,
   type DocType,
 } from "@/components/editor/descriptors";
-import type { FieldDescriptor } from "@/lib/editor/serialize";
+import type { FieldDescriptor } from "@/lib/editor/types";
 
 const isBuiltIn = (k: string): k is DocType => isBuiltInDocumentType(k);
 

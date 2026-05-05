@@ -7,7 +7,7 @@
  * a `path`.
  */
 
-import type { FieldDescriptor } from "@/lib/editor/serialize";
+import type { FieldDescriptor } from "@/lib/editor/types";
 
 export const CONTRACT_DESCRIPTORS: FieldDescriptor[] = [
   { section: "Meta", path: "document_type", label: "Type" },

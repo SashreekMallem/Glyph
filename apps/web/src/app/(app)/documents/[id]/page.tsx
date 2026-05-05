@@ -5,9 +5,10 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 
 import { trpc } from "@/lib/trpc";
-import { Editor } from "@/components/editor/Editor";
-import type { DocType } from "@/components/editor/descriptors";
-import type { ValidationReport } from "@/components/editor/plugins/validation";
+import {
+  TiptapEditor,
+  type ExtractedField,
+} from "@/components/editor/TiptapEditor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,10 +18,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { FadeIn, FadeInUp } from "@/components/motion/primitives";
-
-function isDocType(v: string): v is DocType {
-  return v === "contract" || v === "resume" || v === "invoice";
-}
 
 export default function DocumentPage({
   params,
@@ -32,9 +29,9 @@ export default function DocumentPage({
   const docQuery = trpc.documents.get.useQuery({ id });
   const doc = docQuery.data;
 
-  const [validation, setValidation] = useState<ValidationReport | null>(null);
   const [title, setTitle] = useState("");
   const [editingTitle, setEditingTitle] = useState(false);
+  const [fields] = useState<readonly ExtractedField[]>([]);
 
   useEffect(() => {
     if (doc) setTitle(doc.title);
@@ -59,13 +56,13 @@ export default function DocumentPage({
     },
   });
 
-  const handleSave = useCallback(
-    (json: Record<string, unknown>) => {
+  const handleChange = useCallback(
+    (json: object) => {
       if (!doc) return;
       save.mutate({
         id: doc.id,
-        prosemirrorState: doc.prosemirrorState,
-        validatedJson: json,
+        prosemirrorState: null,
+        validatedJson: json as Record<string, unknown>,
       });
     },
     [doc, save],
@@ -79,11 +76,7 @@ export default function DocumentPage({
     );
   }
 
-  const docType = doc.documentType;
-  const typeSupported = isDocType(docType);
-
-  const canFinalize =
-    !doc.isFinalized && validation !== null && validation.valid;
+  const canFinalize = !doc.isFinalized;
   const canExport = doc.isFinalized;
 
   return (
@@ -134,66 +127,22 @@ export default function DocumentPage({
         </div>
       </FadeInUp>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <FadeIn className="lg:col-span-2">
-          <Card className="p-6">
-            {typeSupported ? (
-              <Editor
-                documentType={docType}
-                docId={doc.id}
-                schemaVersion={doc.schemaVersion}
-                onSave={handleSave}
-                onValidation={setValidation}
-              />
-            ) : (
-              <div className="text-sm text-neutral-500">
-                Editor does not yet support the
-                <span className="font-medium"> {docType}</span> document type.
-              </div>
-            )}
-          </Card>
+      <div className="grid grid-cols-1 gap-6">
+        <FadeIn>
+          <TiptapEditor
+            initialHtml=""
+            onChange={handleChange}
+            fields={fields}
+          />
         </FadeIn>
 
-        <FadeIn className="lg:col-span-1">
+        <FadeIn>
           <Card>
             <CardHeader>
-              <CardTitle>Validation</CardTitle>
+              <CardTitle>Actions</CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
-              {validation === null ? (
-                <div className="text-sm text-neutral-500">
-                  Waiting for input…
-                </div>
-              ) : validation.valid ? (
-                <Badge variant="success" className="w-fit">
-                  Valid
-                </Badge>
-              ) : "drafting" in validation && validation.drafting ? (
-                <div className="text-sm text-neutral-500">
-                  Drafting… keep typing. The classifier will tag fields
-                  automatically.
-                </div>
-              ) : "errors" in validation ? (
-                <div className="flex flex-col gap-2">
-                  <Badge variant="destructive" className="w-fit">
-                    {validation.errors.length} issue
-                    {validation.errors.length === 1 ? "" : "s"}
-                  </Badge>
-                  <ul className="space-y-1.5 text-sm">
-                    {validation.errors.map((e, i) => (
-                      <li key={i} className="leading-tight">
-                        <span className="font-mono text-xs text-neutral-400">
-                          {e.path || "(root)"}
-                        </span>
-                        <br />
-                        <span className="text-neutral-700">{e.message}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-
-              <div className="flex flex-col gap-2 border-t border-neutral-100 pt-4">
+              <div className="flex flex-col gap-2">
                 <Button
                   disabled={!canFinalize || finalize.isPending}
                   onClick={() => finalize.mutate({ id: doc.id })}
