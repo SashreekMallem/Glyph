@@ -43,10 +43,22 @@ export default function DocumentPage({
       void utils.documents.list.invalidate();
     },
   });
+  const [finalizeError, setFinalizeError] = useState<{
+    readonly message: string;
+    readonly issues?: readonly { path: readonly (string | number)[]; message: string }[];
+  } | null>(null);
   const finalize = trpc.documents.finalize.useMutation({
     onSuccess: async () => {
+      setFinalizeError(null);
       await utils.documents.get.invalidate({ id });
       await utils.documents.list.invalidate();
+    },
+    onError: (err) => {
+      // tRPC ZodError is serialized into err.data.zodError; fall back to
+      // err.message for non-validation failures.
+      const data = (err.data as { zodError?: unknown } | null | undefined) ?? null;
+      const issues = extractIssues(data?.zodError);
+      setFinalizeError({ message: err.message, issues });
     },
   });
   const exportPdf = trpc.documents.exportPdf.useMutation({
@@ -146,7 +158,10 @@ export default function DocumentPage({
               <div className="flex flex-col gap-2">
                 <Button
                   disabled={!canFinalize || finalize.isPending}
-                  onClick={() => finalize.mutate({ id: doc.id })}
+                  onClick={() => {
+                    setFinalizeError(null);
+                    finalize.mutate({ id: doc.id });
+                  }}
                 >
                   {finalize.isPending
                     ? "Finalizing…"
@@ -162,6 +177,33 @@ export default function DocumentPage({
                   {exportPdf.isPending ? "Exporting…" : "Export PDF"}
                 </Button>
               </div>
+              {finalizeError && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 dark:border-amber-900/40 dark:bg-amber-900/10">
+                  <p className="font-mono text-[0.6rem] uppercase tracking-[0.18em] text-amber-700 dark:text-amber-400">
+                    Cannot finalize · {finalizeError.issues?.length ?? 0} issue
+                    {(finalizeError.issues?.length ?? 0) === 1 ? "" : "s"}
+                  </p>
+                  {finalizeError.issues && finalizeError.issues.length > 0 ? (
+                    <ul className="mt-2 space-y-1.5 text-sm">
+                      {finalizeError.issues.slice(0, 8).map((iss, i) => (
+                        <li key={i} className="leading-tight">
+                          <span className="font-mono text-[10px] text-neutral-500">
+                            {iss.path.join(".") || "(root)"}
+                          </span>
+                          <br />
+                          <span className="text-neutral-800 dark:text-neutral-200">
+                            {iss.message}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-1 text-sm text-neutral-800 dark:text-neutral-200">
+                      {finalizeError.message}
+                    </p>
+                  )}
+                </div>
+              )}
             </CardContent>
           </Card>
         </FadeIn>
@@ -222,4 +264,32 @@ function escapeHtml(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+// ---------------------------------------------------------------------------
+// extractIssues — pull the path+message issue list out of the tRPC zodError
+// blob without taking a hard runtime dep on Zod's internal shape.
+// ---------------------------------------------------------------------------
+
+function extractIssues(
+  zodError: unknown,
+): readonly { path: readonly (string | number)[]; message: string }[] | undefined {
+  if (!zodError || typeof zodError !== "object") return undefined;
+  const issues = (zodError as { issues?: unknown }).issues;
+  if (!Array.isArray(issues)) return undefined;
+  const out: { path: readonly (string | number)[]; message: string }[] = [];
+  for (const it of issues) {
+    if (!it || typeof it !== "object") continue;
+    const path = (it as { path?: unknown }).path;
+    const message = (it as { message?: unknown }).message;
+    if (Array.isArray(path) && typeof message === "string") {
+      out.push({
+        path: path.filter(
+          (p): p is string | number => typeof p === "string" || typeof p === "number",
+        ),
+        message,
+      });
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }

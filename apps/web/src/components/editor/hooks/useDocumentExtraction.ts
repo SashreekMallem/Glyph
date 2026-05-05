@@ -14,7 +14,13 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
-import { applyPatches, decode, type RFC6902Patch } from "@glyph/extract/client";
+import {
+  applyPatches,
+  decode,
+  regionsFromOps,
+  type FieldRegions,
+  type RFC6902Patch,
+} from "@glyph/extract/client";
 
 import { ExtractClient } from "@/lib/extract/client";
 import type { ExtractedField } from "@/components/editor/FieldsPanel";
@@ -36,6 +42,12 @@ export interface UseDocumentExtractionResult {
   readonly error: string | null;
   /** Last raw decoded JSON. Useful for the toolbar/save mutation. */
   readonly json: unknown;
+  /**
+   * Per-leaf source regions (path → `[start, end)`) accumulated from every
+   * op the model has emitted. Last-writer-wins on duplicate paths so a
+   * `replace` after an `add` overwrites the older span.
+   */
+  readonly regions: FieldRegions;
 }
 
 const DEBOUNCE_MS = 350;
@@ -48,7 +60,9 @@ export function useDocumentExtraction({
 }: UseDocumentExtractionArgs): UseDocumentExtractionResult {
   const clientRef = useRef<ExtractClient | null>(null);
   const easeRef = useRef<unknown>({});
+  const regionsRef = useRef<FieldRegions>({});
   const [json, setJson] = useState<unknown>(null);
+  const [regions, setRegions] = useState<FieldRegions>({});
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,6 +77,12 @@ export function useDocumentExtraction({
           // Fold incoming patches into the running EASE state.
           const fold = applyPatches(easeRef.current, patches);
           easeRef.current = fold.state;
+          // Accumulate source regions (last-writer-wins on duplicate paths).
+          const incomingRegions = regionsFromOps(patches);
+          if (Object.keys(incomingRegions).length > 0) {
+            regionsRef.current = { ...regionsRef.current, ...incomingRegions };
+            setRegions(regionsRef.current);
+          }
           setStreaming(true);
           // `decode` requires a Zod schema as its second arg; we pass
           // a permissive `any` schema so it passes through untouched.
@@ -108,7 +128,7 @@ export function useDocumentExtraction({
     return flattenLeaves(json as Record<string, unknown>);
   }, [json]);
 
-  return { fields, streaming, error, json };
+  return { fields, streaming, error, json, regions };
 }
 
 // ---------------------------------------------------------------------------

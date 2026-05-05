@@ -5,3 +5,4 @@ export * from "./types";
 export * from "./lenient-parser";
 export * from "./ease";
 export * from "./patches";
+export * from "./regions";

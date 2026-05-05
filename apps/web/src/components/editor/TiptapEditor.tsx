@@ -145,7 +145,7 @@ export function TiptapEditor({
     };
   }, []);
 
-  // Streaming Gemini extraction → flat field list.
+  // Streaming Gemini extraction → flat field list + source-region map.
   const liveExtraction = useDocumentExtraction({
     docId: extraction?.docId ?? "",
     schemaType: extraction?.schemaType ?? "",
@@ -154,17 +154,20 @@ export function TiptapEditor({
   });
 
   const fields = extraction ? liveExtraction.fields : externalFields;
+  const liveRegions = liveExtraction.regions;
 
-  // Apply GlyphFieldMark for every value we just extracted. We do a
-  // string match on the live editor text to find the span — good enough
-  // until we plumb per-leaf source regions all the way through.
+  // Apply GlyphFieldMark for every value we just extracted. When the
+  // model emitted source regions for a path, we use those byte offsets
+  // (mapped to ProseMirror doc positions). Otherwise we fall back to a
+  // plain-text indexOf — fragile for synthesized values like "five years"
+  // → "5 years" but correct for proper-noun-style leaves.
   useEffect(() => {
     if (!editor || !extraction) return;
     if (fields.length === 0) return;
-    applyFieldMarks(editor, fields);
+    applyFieldMarks(editor, fields, liveRegions);
     // Only re-apply when fields actually change, not on every transaction.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fields, editor, extraction]);
+  }, [fields, liveRegions, editor, extraction]);
 
   const editorRoot = surfaceRef.current;
 
@@ -201,39 +204,69 @@ export function TiptapEditor({
 }
 
 // ---------------------------------------------------------------------------
-// applyFieldMarks — find each extracted leaf value in the editor text and
-// wrap it with the GlyphFieldMark mark so the side panel's jump-to lands.
-// String-match is fragile but acceptable until per-leaf source regions
-// flow through the pipeline (see _meta.regions on the backend).
+// applyFieldMarks — wrap each extracted leaf value in the editor with the
+// GlyphFieldMark so the side panel's jump-to lands on the right span.
+//
+// Two sourcing paths, in priority order:
+//
+//   1. Source regions (preferred). The model emitted `srcStart`/`srcEnd`
+//      byte offsets into the editor's plain text. We translate those to
+//      ProseMirror doc positions via a single linear walk that mirrors
+//      the editor's `getText()` semantics (text-node content concatenated
+//      with `\n` between block boundaries).
+//
+//   2. Plain-text indexOf fallback. When no region is available, search
+//      the editor text for the first occurrence of the value. Fragile for
+//      synthesized values (e.g. "5 years" rendered for "five years") but
+//      correct for proper-noun leaves.
 // ---------------------------------------------------------------------------
 
-function applyFieldMarks(editor: Editor, fields: readonly ExtractedField[]) {
+function applyFieldMarks(
+  editor: Editor,
+  fields: readonly ExtractedField[],
+  regions: Record<string, [number, number]>,
+) {
   const doc = editor.state.doc;
   const tr = editor.state.tr;
+  const markType = editor.schema.marks.glyphField;
+  if (!markType) return;
   let touched = false;
+
+  // Build a plain-text-offset → doc-position map ONCE per call.
+  const offsetIndex = buildPlainTextIndex(doc);
 
   for (const field of fields) {
     if (field.value === null || field.value === undefined) continue;
-    const needle = String(field.value).trim();
-    if (needle.length < 2) continue;
+    const region = regions[field.path];
 
-    // Walk text nodes and find the FIRST occurrence of the needle.
     let foundFrom = -1;
     let foundTo = -1;
-    doc.descendants((node, pos) => {
-      if (foundFrom !== -1) return false;
-      if (!node.isText || !node.text) return true;
-      const idx = node.text.indexOf(needle);
-      if (idx >= 0) {
-        foundFrom = pos + idx;
-        foundTo = foundFrom + needle.length;
-      }
-      return true;
-    });
-    if (foundFrom < 0) continue;
 
-    const markType = editor.schema.marks.glyphField;
-    if (!markType) continue;
+    if (region) {
+      const [start, end] = region;
+      const fromPos = offsetIndex.toDocPos(start);
+      const toPos = offsetIndex.toDocPos(end);
+      if (fromPos !== null && toPos !== null && toPos > fromPos) {
+        foundFrom = fromPos;
+        foundTo = toPos;
+      }
+    }
+
+    if (foundFrom < 0) {
+      const needle = String(field.value).trim();
+      if (needle.length < 2) continue;
+      doc.descendants((node, pos) => {
+        if (foundFrom !== -1) return false;
+        if (!node.isText || !node.text) return true;
+        const idx = node.text.indexOf(needle);
+        if (idx >= 0) {
+          foundFrom = pos + idx;
+          foundTo = foundFrom + needle.length;
+        }
+        return true;
+      });
+      if (foundFrom < 0) continue;
+    }
 
     // Skip if this exact range already carries the same path.
     const existing = doc
@@ -248,6 +281,7 @@ function applyFieldMarks(editor: Editor, fields: readonly ExtractedField[]) {
       markType.create({
         path: field.path,
         verified: field.verified ?? null,
+        region: region ?? null,
       }),
     );
     touched = true;
@@ -259,4 +293,61 @@ function applyFieldMarks(editor: Editor, fields: readonly ExtractedField[]) {
     tr.setMeta("addToHistory", false);
     editor.view.dispatch(tr);
   }
+}
+
+/**
+ * Build an offset→position lookup for the current doc. We walk every
+ * text node accumulating its length into a plain-text counter, plus a
+ * `\n` between block-level node boundaries to match `editor.getText()`.
+ *
+ * Returns a `toDocPos(offset)` function that maps a plain-text offset
+ * back to the ProseMirror doc position the model meant.
+ */
+interface OffsetIndex {
+  toDocPos: (textOffset: number) => number | null;
+}
+
+function buildPlainTextIndex(doc: import("@tiptap/pm/model").Node): OffsetIndex {
+  // Each entry: { textStart, textEnd, docStart } — a contiguous text run.
+  // Block boundaries between runs cost 1 plain-text char (the "\n").
+  interface Run {
+    readonly textStart: number;
+    readonly textEnd: number;
+    readonly docStart: number;
+  }
+  const runs: Run[] = [];
+  let textCursor = 0;
+  let prevWasText = false;
+
+  doc.descendants((node, pos) => {
+    if (node.isText && node.text) {
+      const len = node.text.length;
+      runs.push({
+        textStart: textCursor,
+        textEnd: textCursor + len,
+        docStart: pos,
+      });
+      textCursor += len;
+      prevWasText = true;
+      return false;
+    }
+    if (node.isBlock && prevWasText) {
+      // The model received "\n" between blocks (mirrors getText()).
+      textCursor += 1;
+      prevWasText = false;
+    }
+    return true;
+  });
+
+  return {
+    toDocPos(textOffset: number): number | null {
+      // Find the run that contains this text offset.
+      for (const r of runs) {
+        if (textOffset >= r.textStart && textOffset <= r.textEnd) {
+          return r.docStart + (textOffset - r.textStart);
+        }
+      }
+      return null;
+    },
+  };
 }
