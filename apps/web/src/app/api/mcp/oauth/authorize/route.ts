@@ -118,6 +118,7 @@ async function parseAndValidate(
 
 function consentPage(req: ParsedRequest, clientName: string, csrf: string) {
   const params = new URLSearchParams({
+    response_type: "code",
     client_id: req.clientId,
     redirect_uri: req.redirectUri,
     code_challenge: req.codeChallenge,
