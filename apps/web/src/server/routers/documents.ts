@@ -49,6 +49,10 @@ const DocumentDTOSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   validatedJson: z.unknown().optional(),
+  encryptedPayload: z.string().nullable().optional(),
+  payloadIv: z.string().nullable().optional(),
+  payloadTag: z.string().nullable().optional(),
+  payloadSignature: z.string().nullable().optional(),
 });
 
 /**

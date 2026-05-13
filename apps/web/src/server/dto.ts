@@ -20,6 +20,16 @@ export interface DocumentDTO {
   updatedAt: string;
   /** Only present when the caller owns the document and it is not yet finalized. */
   validatedJson?: unknown;
+  /**
+   * Ciphertext + signature for the canonical signed payload. Safe to
+   * expose — useless without the server's master/signing keys. Surfaced
+   * so the editor page can pass them through to the TiptapEditor for
+   * re-hydration on open.
+   */
+  encryptedPayload?: string | null;
+  payloadIv?: string | null;
+  payloadTag?: string | null;
+  payloadSignature?: string | null;
 }
 
 export function toDocumentDTO(
@@ -50,6 +60,10 @@ export function toDocumentDTO(
   if (opts.includeValidatedJson && !doc.isFinalized) {
     dto.validatedJson = opts.validatedJson ?? null;
   }
+  dto.encryptedPayload = doc.encryptedPayload;
+  dto.payloadIv = doc.payloadIv;
+  dto.payloadTag = doc.payloadTag;
+  dto.payloadSignature = doc.payloadSignature;
   return dto;
 }
 
