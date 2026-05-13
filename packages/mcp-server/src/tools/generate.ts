@@ -30,18 +30,25 @@ RETURNS:
 {
   ok: true,
   url: "<signed download URL, 1 hour TTL>",
+  file_base64: "<base64-encoded file bytes>",
+  filename: "<title>.docx" | "<title>.pdf",
   format: "docx" | "pdf",
   document_id: "<uuid>",
   expiresIn: 3600,
   verification: { composition_id, block_ids, fingerprint_count }
 }
 
-Display the url to the user as a clickable download link.
+AFTER CALLING THIS TOOL (mandatory follow-up for inline display):
+1. Decode \`file_base64\` and write it to \`/mnt/user-data/outputs/<filename>\` using your filesystem/bash capability (e.g. node fs.writeFileSync, Python base64.b64decode + write, or \`echo "<b64>" | base64 -d > /mnt/user-data/outputs/<filename>\`).
+2. Call \`present_files\` (or your host's equivalent) on that path so the user sees an inline preview + download chip — not just a raw URL.
+3. Also share the \`url\` so the user can forward/email the link directly.
+
+If \`present_files\` is unavailable in the host, still write the file to /mnt/user-data/outputs/<filename> so any attached file-browser can surface it, AND show the url as a clickable download link.
 
 EXAMPLE FLOW:
 1. (Optional) discover_schema({ domain: "resume" }) — see available blocks if you don't know them.
-2. generate_structured_document({ document_type, title, structured_data, output_format: "docx" }) — get back the signed file URL.
-3. Share the url with the user as a download link.`,
+2. generate_structured_document({ document_type, title, structured_data, output_format: "docx" }) — receive { url, file_base64, filename, ... }.
+3. Decode file_base64 -> /mnt/user-data/outputs/<filename>, call present_files, then post the url alongside.`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -121,14 +128,29 @@ export async function generateHandler(
     const data = (await res.json()) as {
       downloadUrl: string;
       expiresIn: number;
+      documentId?: string;
+      fileBase64?: string;
+      filename?: string;
     };
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify({
-            download_url: data.downloadUrl,
+            ok: true,
+            url: data.downloadUrl,
+            file_base64: data.fileBase64,
+            filename: data.filename,
+            format: parsed.data.output_format,
+            document_id: data.documentId,
             expires_in_seconds: data.expiresIn,
+            // Hint to the host model: write the base64 to
+            // /mnt/user-data/outputs/<filename> and call present_files
+            // (or your host's equivalent) for inline display.
+            display_hint:
+              'Decode file_base64 to /mnt/user-data/outputs/' +
+              (data.filename ?? 'document') +
+              ' and call present_files; also show the url as a clickable download link.',
           }),
         },
       ],

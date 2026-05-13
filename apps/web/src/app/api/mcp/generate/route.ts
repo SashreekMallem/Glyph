@@ -559,9 +559,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Sanitize title into a filesystem-safe filename. Host clients (Claude
+  // Code, Cowork) write file_base64 to /mnt/user-data/outputs/<filename>
+  // and then call present_files for inline preview.
+  const rawTitle = typeof body.title === "string" ? body.title : documentType;
+  const safeTitle =
+    rawTitle.replace(/[^a-zA-Z0-9._ -]+/g, "_").trim().slice(0, 120) || documentType;
+  const filename = `${safeTitle}.${ext}`;
+
   return NextResponse.json({
     downloadUrl: signed.signedUrl,
     expiresIn: EXPIRES_IN,
     documentId,
+    fileBase64: fileBytes.toString("base64"),
+    filename,
   });
 }
