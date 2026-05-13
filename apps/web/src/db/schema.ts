@@ -465,6 +465,72 @@ export const schemaBlockProposals = pgTable("schema_block_proposals", {
     .defaultNow(),
 });
 
+/**
+ * OAuth 2.1 dynamic client registration (RFC 7591).
+ *
+ * One row per MCP client (claude.ai, ChatGPT, custom integrations) that
+ * registered itself via POST /api/mcp/oauth/register. The client_secret
+ * is stored in plaintext because the MCP spec mandates that public
+ * clients (Claude/ChatGPT/Perplexity) use PKCE and DON'T send a secret —
+ * the field is kept for RFC 7591 spec compliance even though it's never
+ * used to authenticate.
+ */
+export const oauthClients = pgTable(
+  "oauth_clients",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    clientId: text("client_id").notNull(),
+    clientName: text("client_name").notNull(),
+    redirectUris: jsonb("redirect_uris").notNull().$type<string[]>(),
+    grantTypes: jsonb("grant_types")
+      .notNull()
+      .$type<string[]>()
+      .default(sql`'["authorization_code","refresh_token"]'::jsonb`),
+    tokenEndpointAuthMethod: text("token_endpoint_auth_method")
+      .notNull()
+      .default("none"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    clientIdUnique: uniqueIndex("oauth_clients_client_id_unique").on(t.clientId),
+  }),
+);
+
+/**
+ * Short-lived authorization codes for the OAuth code grant + PKCE flow.
+ * Code is created at /authorize when the user clicks Allow, exchanged at
+ * /token within 10 min for an access token (a wrapped API key). Single-use.
+ */
+export const oauthCodes = pgTable(
+  "oauth_codes",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    code: text("code").notNull(),
+    clientId: text("client_id").notNull(),
+    userId: uuid("user_id").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    codeChallengeMethod: text("code_challenge_method").notNull().default("S256"),
+    scope: text("scope"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    codeUnique: uniqueIndex("oauth_codes_code_unique").on(t.code),
+    expiresIdx: index("oauth_codes_expires_at_idx").on(t.expiresAt),
+  }),
+);
+
+export type OauthClient = typeof oauthClients.$inferSelect;
+export type NewOauthClient = typeof oauthClients.$inferInsert;
+export type OauthCode = typeof oauthCodes.$inferSelect;
+export type NewOauthCode = typeof oauthCodes.$inferInsert;
+
 export type UserProfile = typeof usersProfile.$inferSelect;
 export type Document = typeof documents.$inferSelect;
 export type NewDocument = typeof documents.$inferInsert;

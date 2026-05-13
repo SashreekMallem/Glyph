@@ -61,6 +61,11 @@ function parseBearer(header: string | null): string | null {
   return m?.[1] ?? null;
 }
 
+function buildWwwAuthenticate(req: NextRequest): string {
+  const origin = new URL(req.url).origin;
+  return `Bearer realm="glyph-mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource"`;
+}
+
 async function authenticate(
   req: NextRequest,
 ): Promise<{ userId: string } | { error: NextResponse }> {
@@ -77,7 +82,12 @@ async function authenticate(
             data: { httpStatus: 401 },
           },
         },
-        { status: 401 },
+        {
+          status: 401,
+          // RFC 9728 — tells the MCP client where to find OAuth metadata
+          // so it can run the dynamic-client-registration flow.
+          headers: { "WWW-Authenticate": buildWwwAuthenticate(req) },
+        },
       ),
     };
   }
@@ -95,7 +105,10 @@ async function authenticate(
           id: null,
           error: { code: -32001, message: "Invalid API key", data: { httpStatus: 401 } },
         },
-        { status: 401 },
+        {
+          status: 401,
+          headers: { "WWW-Authenticate": buildWwwAuthenticate(req) },
+        },
       ),
     };
   }
@@ -108,7 +121,10 @@ async function authenticate(
           id: null,
           error: { code: -32001, message: "Invalid API key", data: { httpStatus: 401 } },
         },
-        { status: 401 },
+        {
+          status: 401,
+          headers: { "WWW-Authenticate": buildWwwAuthenticate(req) },
+        },
       ),
     };
   }
