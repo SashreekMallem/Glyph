@@ -3,8 +3,33 @@ import type { ToolResult } from './structure.js';
 
 export const discoverSchemaTool = {
   name: 'discover_schema',
-  description:
-    'Discover what schema blocks are available for a document domain. Returns the list of curated, reusable schema fragments — required blocks (must always be included) and optional blocks (e.g. projects, publications, certifications for resume). Use this BEFORE generate_structured_document to compose a schema that exactly matches the document you are creating. The block library is the foundation of Glyph adaptive schemas: blocks are reused across users, costs nothing extra to use, and consumers can always parse the result.',
+  description: `List the schema blocks available for a document domain. Each block is a small reusable JSON Schema fragment (e.g. "resume.experience.v1") that contributes properties to the final composition.
+
+USE THIS WHEN:
+- You are about to call generate_structured_document and you don't already know the exact field shape for the document type.
+- The user wants a non-standard composition (e.g. resume WITH projects + publications but WITHOUT skills).
+
+DO NOT USE THIS WHEN:
+- You already know the schema (e.g. you just called it earlier in this conversation).
+- The user just wants the default — generate_structured_document with no block_ids picks the required defaults automatically.
+
+WHY: Calling discover_schema first means you fill the structured_data correctly on the first generate call. No retries, no validation rejections, no guesses.
+
+INPUTS:
+- domain: e.g. "resume", "contract", "invoice", or any custom domain key.
+- api_key: required.
+
+RETURNS:
+{
+  blocks: [
+    { id: "resume.base.v1", required: true, fields: ["full_name", "email", "summary"] },
+    { id: "resume.experience.v1", required: true, fields: [...] },
+    { id: "resume.projects.v1", required: false, fields: [...] },
+    ...
+  ]
+}
+
+If the returned list is empty for a domain, consider calling propose_schema_block to register a new block for that domain instead of inventing an ad-hoc shape.`,
   inputSchema: {
     type: 'object',
     properties: {

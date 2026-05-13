@@ -225,18 +225,23 @@ function decodeWalk(value: unknown, schema: z.ZodTypeAny): unknown {
 
   const unwrapped = unwrapSchema(schema);
 
+  // If the value is an EASE container, decode it into an array unconditionally.
+  // This is required for PASSTHROUGH (z.any()) schemas used on the frontend.
+  if (isEaseEncoded(value)) {
+    const out: unknown[] = [];
+    const elementSchema = unwrapped instanceof z.ZodArray
+      ? unwrapped._def.type
+      : unwrapped;
+    for (const key of value.display_order) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        out.push(decodeWalk(value[key], elementSchema));
+      }
+    }
+    return out;
+  }
+
   if (unwrapped instanceof z.ZodArray) {
     const elementSchema: z.ZodTypeAny = unwrapped._def.type;
-
-    if (isEaseEncoded(value)) {
-      const out: unknown[] = [];
-      for (const key of value.display_order) {
-        if (Object.prototype.hasOwnProperty.call(value, key)) {
-          out.push(decodeWalk(value[key], elementSchema));
-        }
-      }
-      return out;
-    }
 
     if (Array.isArray(value)) {
       // Idempotent: already a plain array. Recurse into elements in case

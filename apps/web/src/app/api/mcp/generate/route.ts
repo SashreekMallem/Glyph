@@ -38,6 +38,7 @@ export const dynamic = "force-dynamic";
 interface GenerateBody {
   readonly document_type?: unknown;
   readonly structured_data?: unknown;
+  readonly body_markdown?: unknown;
   readonly output_format?: unknown;
   readonly title?: unknown;
   readonly schema_version?: unknown;
@@ -499,7 +500,28 @@ export async function POST(req: NextRequest) {
 
   if (outputFormat === "docx") {
     const title = typeof body.title === "string" ? body.title : documentType;
-    fileBytes = buildDocx(title, payloadMeta);
+    const bodyMarkdown =
+      typeof body.body_markdown === "string" && body.body_markdown.length > 0
+        ? body.body_markdown
+        : null;
+
+    if (bodyMarkdown) {
+      // PROFESSIONAL PATH: AI provided markdown — render with docx-js for
+      // real Word formatting (headings, bold, lists, tables), then inject
+      // our signed custom XML part.
+      const { renderMarkdownToDocx, injectGlyphCustomXml } = await import(
+        "@/lib/docx/markdown-to-docx"
+      );
+      const baseDocx = await renderMarkdownToDocx({ title, bodyMarkdown });
+      const customXml = buildStructuredXml(payloadMeta);
+      fileBytes = injectGlyphCustomXml({ docxBytes: baseDocx, customXml });
+    } else {
+      // FALLBACK PATH: no markdown — minimal `path: value` layout. Useful
+      // for machine-only documents; ugly for humans (see MCP tool
+      // description — body_markdown is strongly recommended).
+      fileBytes = buildDocx(title, payloadMeta);
+    }
+
     contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     ext = "docx";
   } else {

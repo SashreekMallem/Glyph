@@ -4,8 +4,27 @@ import type { ToolResult } from './structure.js';
 
 export const validateTool = {
   name: 'validate_document',
-  description:
-    'Validate structured document JSON against its Glyph schema. Works with any document type — built-in (resume, contract, invoice) or custom types registered in your Glyph account. Returns valid:true or a list of field errors.',
+  description: `Validate a structured JSON payload against its Glyph schema. Pure validation — no LLM, no network beyond schema resolution.
+
+USE THIS WHEN:
+- You have composed a structured payload and want to confirm it will pass generate_structured_document's server-side check before calling it.
+- You are ingesting third-party JSON and need to confirm it matches a Glyph schema before storing or signing it.
+
+DO NOT USE THIS WHEN:
+- You just want to know if a Glyph-stamped FILE is authentic — use read_glyph_payload (it verifies the Ed25519 signature as part of its return).
+- You want to convert raw text to structured JSON — use structure_document.
+
+INPUTS:
+- document_type: built-in or custom typeKey.
+- structured_data: object to validate.
+- block_ids: optional composition (same as generate_structured_document).
+- api_key: required for custom types.
+
+RETURNS:
+{ valid: true } on success, or
+{ valid: false, errors: [ { path, message } ] } on validation failure.
+
+PREFER this as a cheap pre-flight check before generate_structured_document if you are uncertain about the payload shape — it is much faster than getting a 422 from the generate call.`,
   inputSchema: {
     type: 'object',
     properties: {

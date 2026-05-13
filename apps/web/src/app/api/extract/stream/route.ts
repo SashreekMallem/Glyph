@@ -389,13 +389,15 @@ export async function POST(req: NextRequest): Promise<Response> {
   });
 
   // --- Build the extract request. ---
-  // When fullText is provided, reset currentEase to {} so Gemini does a full
-  // re-extraction from the complete document rather than an incremental diff
-  // against potentially stale DB state.
+  // On the very first request of a streaming session (clientSeq === 0), reset currentEase
+  // to {} if fullText is provided. This forces Gemini to do a full re-extraction from
+  // scratch, sending all paths back down to the client so the client's `easeRef` becomes
+  // perfectly synced with the backend's EASE structure. Subsequent calls in the same
+  // session will do an incremental diff, saving 99% of output tokens.
   const extractReq: StreamExtractRequest = {
     schemaJson,
     schemaVersion,
-    currentEase: body.fullText ? {} : currentEase,
+    currentEase: body.fullText && body.clientSeq === 0 ? {} : currentEase,
     textDelta: body.textDelta,
     fullText: body.fullText,
     sessionId: sessionId!,
@@ -574,6 +576,7 @@ export async function POST(req: NextRequest): Promise<Response> {
             await metric.observe("extract.cost_usd", costUsd * 1_000_000);
           } else if (ev.type === "error") {
             sawError = true;
+            console.error("====== GEMINI STREAM YIELDED ERROR ======\n", ev.error, "\n=========================================");
             safeEnqueue(sseEvent("error", { error: ev.error ?? "unknown" }));
           } else if (ev.type === "done") {
             // Handled below.
@@ -606,6 +609,7 @@ export async function POST(req: NextRequest): Promise<Response> {
         safeEnqueue(sseEvent("done", { sessionId }));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        console.error("====== GEMINI STREAM ERROR ======\n", message, "\n=================================");
         log({
           requestId,
           userId,

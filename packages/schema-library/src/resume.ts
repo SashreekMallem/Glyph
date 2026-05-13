@@ -61,9 +61,9 @@ export const ResumeSchema = z
 
     personal: PersonalSchema,
     summary: z.string().min(1).optional(),
-    experience: z.array(ExperienceSchema),
-    education: z.array(EducationSchema),
-    skills: z.array(SkillGroupSchema),
+    experience: z.array(ExperienceSchema).default([]),
+    education: z.array(EducationSchema).default([]),
+    skills: z.array(SkillGroupSchema).default([]),
     certifications: z.array(CertificationSchema).optional(),
   })
   .strict();

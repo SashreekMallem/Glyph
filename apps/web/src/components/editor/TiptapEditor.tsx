@@ -21,8 +21,28 @@
  */
 
 import { useEditor, EditorContent } from "@tiptap/react";
+import { BubbleMenu as BubbleMenuWrapper, FloatingMenu as FloatingMenuWrapper } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
+import Underline from "@tiptap/extension-underline";
+import Subscript from "@tiptap/extension-subscript";
+import Superscript from "@tiptap/extension-superscript";
+import TextAlign from "@tiptap/extension-text-align";
+import Highlight from "@tiptap/extension-highlight";
+import Typography from "@tiptap/extension-typography";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
+import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
+import { Details } from "@tiptap/extension-details";
+import { DetailsContent } from "@tiptap/extension-details-content";
+import { DetailsSummary } from "@tiptap/extension-details-summary";
+import { Image } from "@tiptap/extension-image";
+import { Youtube } from "@tiptap/extension-youtube";
+import { TableOfContents } from "@tiptap/extension-table-of-contents";
+import { TextStyle } from "@tiptap/extension-text-style";
+import { Color } from "@tiptap/extension-color";
+import { FontFamily } from "@tiptap/extension-font-family";
+import { Markdown } from "@tiptap/markdown";
 import Placeholder from "@tiptap/extension-placeholder";
 import CharacterCount from "@tiptap/extension-character-count";
 import {
@@ -33,11 +53,21 @@ import {
 } from "@tiptap/extension-table";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Editor } from "@tiptap/core";
+import { ReactRenderer } from "@tiptap/react";
+import tippy from "tippy.js";
+import { common, createLowlight } from "lowlight";
 
 import { GlyphFieldMark } from "./extensions";
 import { Toolbar } from "./Toolbar";
 import { FieldsPanel, type ExtractedField } from "./FieldsPanel";
 import { useDocumentExtraction } from "./hooks/useDocumentExtraction";
+import { BubbleMenu } from "./menus/BubbleMenu";
+import { FloatingMenu } from "./menus/FloatingMenu";
+import { SlashCommand } from "./menus/SlashCommand";
+import { CommandList, getSuggestionItems } from "./menus/CommandList";
+
+// Create lowlight instance for syntax highlighting
+const lowlight = createLowlight(common);
 
 export type { ExtractedField } from "./FieldsPanel";
 
@@ -71,6 +101,11 @@ export interface TiptapEditorProps {
   readonly extraction?: {
     readonly docId: string;
     readonly schemaType: string;
+    readonly initialJson?: unknown;
+    readonly encrypted?: string;
+    readonly iv?: string;
+    readonly tag?: string;
+    readonly signature?: string;
   };
 }
 
@@ -90,6 +125,7 @@ export function TiptapEditor({
 }: TiptapEditorProps) {
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const extractTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [editorText, setEditorText] = useState<string>("");
 
@@ -113,11 +149,86 @@ export function TiptapEditor({
           emptyEditorClass:
             "before:content-[attr(data-placeholder)] before:float-left before:text-neutral-400 before:italic before:pointer-events-none before:h-0",
         }),
-        CharacterCount,
+        Underline,
+        Subscript,
+        Superscript,
+        TextAlign.configure({
+          types: ["heading", "paragraph"],
+        }),
+        Highlight.configure({ multicolor: true }),
+        Typography,
+        TaskList,
+        TaskItem.configure({
+          nested: true,
+        }),
+        CodeBlockLowlight.configure({
+          lowlight,
+        }),
+        Details,
+        DetailsContent,
+        DetailsSummary,
+        Image.configure({
+          inline: true,
+          allowBase64: true,
+        }),
+        Youtube.configure({
+          width: 640,
+          height: 360,
+        }),
+        TableOfContents,
+        TextStyle,
+        Color,
+        FontFamily,
+        Markdown,
         Table.configure({ resizable: true }),
         TableRow,
         TableHeader,
         TableCell,
+        SlashCommand.configure({
+          suggestion: {
+            items: getSuggestionItems,
+            render: () => {
+              let component: any;
+              let popup: any;
+
+              return {
+                onStart: (props: any) => {
+                  component = new ReactRenderer(CommandList, {
+                    props,
+                    editor: props.editor,
+                  });
+
+                  popup = tippy("body", {
+                    getReferenceClientRect: props.clientRect,
+                    appendTo: () => document.body,
+                    content: component.element,
+                    showOnCreate: true,
+                    interactive: true,
+                    trigger: "manual",
+                    placement: "bottom-start",
+                  });
+                },
+                onUpdate(props: any) {
+                  component.updateProps(props);
+                  popup[0].setProps({
+                    getReferenceClientRect: props.clientRect,
+                  });
+                },
+                onKeyDown(props: any) {
+                  if (props.event.key === "Escape") {
+                    popup[0].hide();
+                    return true;
+                  }
+                  return component.ref?.onKeyDown(props);
+                },
+                onExit() {
+                  popup[0].destroy();
+                  component.destroy();
+                },
+              };
+            },
+          },
+        }),
         GlyphFieldMark,
       ],
       // initialContent (Tiptap JSON) takes priority over initialHtml string.
@@ -127,6 +238,8 @@ export function TiptapEditor({
         attributes: {
           class:
             "glyph-editor prose prose-neutral dark:prose-invert max-w-none focus:outline-none",
+          spellcheck: "false",
+          "data-gramm": "false",
         },
       },
       onUpdate: ({ editor: ed }) => {
@@ -157,23 +270,137 @@ export function TiptapEditor({
     };
   }, []);
 
+  // Listen for custom export events from the Page header
+  useEffect(() => {
+    const handlePdf = () => console.log("Exporting PDF...");
+    const handleDocx = () => {
+      const html = editor?.getHTML() ?? "";
+      const meta = extraction ? `
+<!-- GLYPH-METADATA
+{
+  "encrypted": "${extraction.encrypted || ""}",
+  "iv": "${extraction.iv || ""}",
+  "tag": "${extraction.tag || ""}",
+  "signature": "${extraction.signature || ""}",
+  "document_type": "${extraction.schemaType || ""}"
+}
+-->` : "";
+      const content = `<html><head><meta charset="UTF-8"></head><body>${meta}${html}</body></html>`;
+      const blob = new Blob([content], { type: "application/msword" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "document.doc";
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+    const handleMd = () => {
+      const markdown = (editor?.storage as any).markdown?.getMarkdown() ?? "";
+      const frontmatter = extraction ? `---
+glyph_id: "${extraction.docId}"
+glyph_type: "${extraction.schemaType}"
+glyph_encrypted: "${extraction.encrypted || ""}"
+glyph_iv: "${extraction.iv || ""}"
+glyph_tag: "${extraction.tag || ""}"
+glyph_signature: "${extraction.signature || ""}"
+---
+
+` : "";
+      const blob = new Blob([frontmatter + markdown], { type: "text/markdown" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "document.md";
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+    const handleTxt = () => {
+      const text = editor?.getText() ?? "";
+      const blob = new Blob([text], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "document.txt";
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
+    document.addEventListener("glyph-export-pdf", handlePdf);
+    document.addEventListener("glyph-export-docx", handleDocx);
+    document.addEventListener("glyph-export-md", handleMd);
+    document.addEventListener("glyph-export-txt", handleTxt);
+    
+    return () => {
+      document.removeEventListener("glyph-export-pdf", handlePdf);
+      document.removeEventListener("glyph-export-docx", handleDocx);
+      document.removeEventListener("glyph-export-md", handleMd);
+      document.removeEventListener("glyph-export-txt", handleTxt);
+    };
+  }, [editor]);
+
+  // Fallback: If live extraction is empty (e.g. for finalized docs), 
+  // harvest fields directly from the document marks.
+  const harvestedFields = useMemo(() => {
+    if (!editor) return [];
+    const found = new Map<string, ExtractedField>();
+    
+    // Visit every node in the document to find marks.
+    editor.state.doc.descendants((node) => {
+      if (node.isText && node.marks.length > 0) {
+        node.marks.forEach((mark) => {
+          if (mark.type.name === "glyphField" && mark.attrs.path) {
+            const path = mark.attrs.path;
+            const text = node.text || "";
+            
+            if (found.has(path)) {
+              // Append text if multiple nodes share the same path (e.g. bolded parts)
+              const existing = found.get(path)!;
+              found.set(path, {
+                ...existing,
+                value: String(existing.value) + text,
+              });
+            } else {
+              found.set(path, {
+                path,
+                value: text,
+              });
+            }
+          }
+        });
+      }
+      return true;
+    });
+    
+    return Array.from(found.values());
+  }, [editor, editor?.state.doc]);
+
   // Streaming Gemini extraction → flat field list + source-region map.
   const liveExtraction = useDocumentExtraction({
     docId: extraction?.docId ?? "",
     schemaType: extraction?.schemaType ?? "",
     text: editorText,
     enabled: !!extraction && !readOnly,
+    initialJson: extraction?.initialJson,
   });
 
-  const fields = extraction ? liveExtraction.fields : externalFields;
+  const fields = useMemo(() => {
+    const base = extraction ? liveExtraction.fields : externalFields;
+    if (base && base.length > 0) return base;
+    return harvestedFields;
+  }, [extraction, liveExtraction.fields, externalFields, harvestedFields]);
+
   const liveRegions = liveExtraction.regions;
 
   // Notify parent whenever extraction produces new structured JSON.
+  // Debounced to avoid hammering the documents.save API on every stream patch.
   const onExtractedRef = useRef(onExtracted);
   onExtractedRef.current = onExtracted;
   useEffect(() => {
     if (!extraction || !liveExtraction.json) return;
-    onExtractedRef.current?.(liveExtraction.json as Record<string, unknown>);
+    if (extractTimer.current) clearTimeout(extractTimer.current);
+    extractTimer.current = setTimeout(() => {
+      onExtractedRef.current?.(liveExtraction.json as Record<string, unknown>);
+    }, SAVE_DEBOUNCE_MS);
   }, [liveExtraction.json, extraction]);
 
   // Apply GlyphFieldMark for every value we just extracted. When the
@@ -204,20 +431,26 @@ export function TiptapEditor({
   }, [sidePanel, fields, editorRoot]);
 
   return (
-    <div className="grid w-full gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+    <div className="grid w-full gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
       <div className="min-w-0">
-        <div className="sticky top-2 z-10 mb-4">
+        <div className="sticky top-[80px] z-10 mb-6">
           <Toolbar editor={editor} lastSaved={lastSaved} />
         </div>
         <div
           ref={surfaceRef}
-          className="rounded-2xl border border-neutral-200 bg-white px-8 py-10 shadow-[0_1px_2px_rgba(0,0,0,0.03)] dark:border-neutral-800 dark:bg-neutral-900 sm:px-12"
+          className="rounded-3xl border border-neutral-200 bg-white px-10 py-12 shadow-[0_1px_3px_rgba(0,0,0,0.02)] dark:border-neutral-800 dark:bg-neutral-900 sm:px-16"
         >
-          <EditorContent editor={editor} />
+          {editor && <BubbleMenu editor={editor} />}
+          {editor && <FloatingMenu editor={editor} />}
+          <EditorContent editor={editor} className="glyph-editor-surface" />
         </div>
       </div>
       {renderedSidePanel !== null && (
-        <aside className="lg:sticky lg:top-2 lg:h-fit">{renderedSidePanel}</aside>
+        <aside className="relative">
+          <div className="sticky top-[80px] h-[calc(100vh-120px)] overflow-y-auto pr-2 scrollbar-hide">
+            {renderedSidePanel}
+          </div>
+        </aside>
       )}
     </div>
   );

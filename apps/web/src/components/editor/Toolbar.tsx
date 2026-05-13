@@ -138,6 +138,9 @@ export function Toolbar({ editor, lastSaved }: ToolbarProps) {
           <path d="M21 7H9a5 5 0 0 0 0 10h4M21 7l-4-4M21 7l-4 4" />
         </svg>
       </IconBtn>
+      <Sep />
+      <FontSelect editor={editor} />
+      <ColorSelect editor={editor} />
 
       <span className="ml-auto flex items-center gap-3 pl-2 pr-1 font-mono text-[10px] uppercase tracking-[0.18em] text-neutral-400">
         <CharCount editor={editor} />
@@ -244,6 +247,56 @@ function CharCount({ editor }: { editor: Editor }) {
   const storage = editor.storage as { characterCount?: { characters: () => number } };
   const n = storage.characterCount?.characters?.() ?? 0;
   return <span>{n.toLocaleString()} ch</span>;
+}
+
+function FontSelect({ editor }: { editor: Editor }) {
+  const fonts = [
+    { label: "Serif", value: "ui-serif" },
+    { label: "Sans", value: "ui-sans-serif" },
+    { label: "Mono", value: "ui-monospace" },
+  ];
+  return (
+    <div className="relative">
+      <select
+        aria-label="Font family"
+        onChange={(e) => editor.chain().focus().setFontFamily(e.target.value).run()}
+        className="cursor-pointer appearance-none rounded-md bg-transparent py-1 pl-2 pr-6 font-mono text-[10px] uppercase tracking-[0.18em] text-neutral-700 hover:bg-neutral-100 focus:outline-none dark:text-neutral-200 dark:hover:bg-neutral-800"
+      >
+        <option value="">Font</option>
+        {fonts.map((f) => (
+          <option key={f.value} value={f.value}>
+            {f.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function ColorSelect({ editor }: { editor: Editor }) {
+  const colors = [
+    { label: "Emerald", value: "#10b981" },
+    { label: "Indigo", value: "#6366f1" },
+    { label: "Rose", value: "#f43f5e" },
+    { label: "Amber", value: "#f59e0b" },
+    { label: "Gray", value: "#71717a" },
+  ];
+  return (
+    <div className="relative">
+      <select
+        aria-label="Text color"
+        onChange={(e) => editor.chain().focus().setColor(e.target.value).run()}
+        className="cursor-pointer appearance-none rounded-md bg-transparent py-1 pl-2 pr-6 font-mono text-[10px] uppercase tracking-[0.18em] text-neutral-700 hover:bg-neutral-100 focus:outline-none dark:text-neutral-200 dark:hover:bg-neutral-800"
+      >
+        <option value="">Color</option>
+        {colors.map((c) => (
+          <option key={c.value} value={c.value}>
+            {c.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
 }
 
 function SaveIndicator({ at }: { at: Date | null }) {

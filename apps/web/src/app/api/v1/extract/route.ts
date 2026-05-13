@@ -137,39 +137,70 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const isPdf =
         filename.endsWith(".pdf") || fileType === "application/pdf";
       const isDocx =
-        filename.endsWith(".docx") ||
-        fileType ===
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      if (isDocx) {
+        filename.endsWith(".docx") || 
+        filename.endsWith(".doc") ||
+        fileType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        fileType === "application/msword";
+      const isMd =
+        filename.endsWith(".md") || 
+        filename.endsWith(".markdown") ||
+        fileType === "text/markdown";
+
+      if (isPdf) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const xmp = extractXmp(bytes);
+        if (!xmp) {
+          return err(
+            400,
+            "no_glyph_metadata",
+            "PDF does not contain a Glyph XMP metadata packet.",
+          );
+        }
+        payload = {
+          encrypted: xmp.encrypted,
+          iv: xmp.iv,
+          tag: xmp.tag,
+          signature: xmp.signature,
+          document_type: xmp.documentType,
+        };
+      } else if (isMd) {
+        const text = await file.text();
+        const match = /---\s*\nglyph_id:.*?\nglyph_type: (.*?)\nglyph_encrypted: (.*?)\nglyph_iv: (.*?)\nglyph_tag: (.*?)\nglyph_signature: (.*?)\n---/s.exec(text);
+        if (!match) {
+          return err(400, "no_glyph_metadata", "Markdown file missing Glyph frontmatter.");
+        }
+        payload = {
+          document_type: match[1]?.trim() || "",
+          encrypted: match[2]?.trim() || "",
+          iv: match[3]?.trim() || "",
+          tag: match[4]?.trim() || "",
+          signature: match[5]?.trim() || "",
+        };
+      } else if (isDocx) {
+        const text = await file.text();
+        const match = /<!-- GLYPH-METADATA\s*\n(.*?)\n-->/s.exec(text);
+        if (!match) {
+          return err(400, "no_glyph_metadata", "Word file missing Glyph metadata comment.");
+        }
+        try {
+          const parsedMeta = JSON.parse(match[1] || "{}");
+          payload = {
+            encrypted: parsedMeta.encrypted,
+            iv: parsedMeta.iv,
+            tag: parsedMeta.tag,
+            signature: parsedMeta.signature,
+            document_type: parsedMeta.document_type,
+          };
+        } catch {
+          return err(400, "bad_request", "Malformed Glyph metadata in Word file.");
+        }
+      } else {
         return err(
           415,
           "unsupported_media_type",
-          "DOCX extraction is not yet supported.",
+          "Only PDF, Word (.doc), and Markdown (.md) are supported for multipart uploads.",
         );
       }
-      if (!isPdf) {
-        return err(
-          415,
-          "unsupported_media_type",
-          "Only application/pdf is supported for multipart uploads.",
-        );
-      }
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const xmp = extractXmp(bytes);
-      if (!xmp) {
-        return err(
-          400,
-          "no_glyph_metadata",
-          "PDF does not contain a Glyph XMP metadata packet.",
-        );
-      }
-      payload = {
-        encrypted: xmp.encrypted,
-        iv: xmp.iv,
-        tag: xmp.tag,
-        signature: xmp.signature,
-        document_type: xmp.documentType,
-      };
     } else if (contentType.includes("application/json")) {
       let body: unknown;
       try {

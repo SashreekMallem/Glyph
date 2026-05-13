@@ -384,7 +384,7 @@ export async function renderResume(doc: Resume): Promise<PDFDocument> {
     }
   }
 
-  if (doc.skills.length > 0) {
+  if (doc.skills && doc.skills.length > 0) {
     drawHeading(cursor, "Skills");
     for (const group of doc.skills) {
       drawText(cursor, `${group.category}: ${group.items.join(", ")}`);
@@ -472,6 +472,113 @@ export async function renderInvoice(doc: Invoice): Promise<PDFDocument> {
 }
 
 // ---------------------------------------------------------------------------
+// Generic renderer for custom/agentic schemas
+// ---------------------------------------------------------------------------
+
+async function renderGenericNode(
+  cursor: LayoutCursor,
+  key: string,
+  value: unknown,
+  depth: number = 0,
+): Promise<void> {
+  if (value === null || value === undefined) return;
+  const indent = depth * 12;
+  const label = key
+    .split("_")
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+    .join(" ");
+
+  // Handle Arrays (Experience lists, skills, achievements)
+  if (Array.isArray(value)) {
+    if (value.length === 0) return;
+    // Don't draw a label for root-level simple arrays if depth is high
+    if (depth > 0 || !/^\d+$/.test(key)) {
+      drawText(cursor, label, { font: cursor.fonts.bold, indent });
+    }
+    for (const item of value) {
+      if (typeof item === "string") {
+        drawText(cursor, `• ${item}`, { indent: indent + 12 });
+      } else {
+        await renderGenericNode(cursor, "", item, depth + 1);
+        cursor.y -= 4; // Slight gap between items
+      }
+    }
+    return;
+  }
+
+  // Handle Objects (Experience entries, personal_info)
+  if (typeof value === "object") {
+    if (label && !/^\d+$/.test(key) && key !== "") {
+      drawText(cursor, label, { font: cursor.fonts.bold, indent });
+    }
+    for (const [k, v] of Object.entries(value)) {
+      if (k === "__ease__" || k === "display_order") continue;
+      await renderGenericNode(cursor, k, v, depth + 1);
+    }
+    return;
+  }
+
+  // Handle Primitive Leaf Nodes (Title, Date, Description)
+  const displayValue = String(value).trim();
+  if (!displayValue) return;
+
+  if (key === "" || /^\d+$/.test(key)) {
+    drawText(cursor, displayValue, { indent });
+  } else {
+    drawText(cursor, `${label}: ${displayValue}`, { indent });
+  }
+}
+
+export async function renderGeneric(doc: GlyphDocument): Promise<PDFDocument> {
+  const typeLabel = (doc.document_type ?? "custom").toUpperCase();
+  const footer = `Generated with Glyph · ${typeLabel}`;
+  const cursor = await newDocument(footer);
+
+  // 1. Title / Header
+  const title = (doc as any).personal_info?.name || (doc as any).name || "Document Summary";
+  drawTitle(cursor, title);
+  
+  const metaBits: string[] = [];
+  if ((doc as any).personal_info?.email) metaBits.push((doc as any).personal_info.email);
+  if ((doc as any).personal_info?.phone) metaBits.push((doc as any).personal_info.phone);
+  if ((doc as any).personal_info?.location) metaBits.push((doc as any).personal_info.location);
+  
+  if (metaBits.length > 0) {
+    drawMeta(cursor, metaBits.join(" · "));
+  }
+
+  // 2. Recursive Content Rendering
+  // We skip only the internal system metadata.
+  const systemFields = ["document_type", "schema_version", "_meta", "id", "userId", "updatedAt", "createdAt"];
+  const entries = Object.entries(doc)
+    .filter(([k]) => !systemFields.includes(k))
+    .sort((a, b) => {
+      // Prioritize summary and personal_info at the top
+      if (a[0] === "summary" || a[0] === "personal_info") return -1;
+      if (b[0] === "summary" || b[0] === "personal_info") return 1;
+      return a[0].localeCompare(b[0]);
+    });
+
+  for (const [k, v] of entries) {
+    if (v === null || v === undefined) continue;
+    
+    // Summary gets special treatment as a lead-in
+    if (k === "summary" && typeof v === "string") {
+      drawHeading(cursor, "Summary");
+      drawText(cursor, v);
+      cursor.y -= SECTION_GAP;
+      continue;
+    }
+
+    // Otherwise, render the node and its children
+    await renderGenericNode(cursor, k, v, 0);
+    cursor.y -= SECTION_GAP;
+  }
+
+  return finalize(cursor);
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
 
@@ -495,6 +602,9 @@ export async function generatePdf(
       break;
     case "invoice":
       pdfDoc = await renderInvoice(document);
+      break;
+    default:
+      pdfDoc = await renderGeneric(document);
       break;
   }
   injectGlyphXmp(pdfDoc, xmp);

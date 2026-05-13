@@ -82,7 +82,7 @@ export const INVOICE_DESCRIPTORS: FieldDescriptor[] = [
   },
 ];
 
-export type DocType = "contract" | "resume" | "invoice";
+export type DocType = "contract" | "resume" | "invoice" | "custom";
 
 export function descriptorsFor(type: DocType): FieldDescriptor[] {
   switch (type) {
@@ -92,6 +92,8 @@ export function descriptorsFor(type: DocType): FieldDescriptor[] {
       return RESUME_DESCRIPTORS;
     case "invoice":
       return INVOICE_DESCRIPTORS;
+    case "custom":
+      return [];
   }
 }
 

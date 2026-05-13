@@ -34,6 +34,8 @@ export interface UseDocumentExtractionArgs {
   readonly text: string;
   /** Skip extraction altogether (e.g. while loading existing content). */
   readonly enabled?: boolean;
+  /** Server-provided initial JSON to hydrate the fields panel immediately. */
+  readonly initialJson?: unknown;
 }
 
 export interface UseDocumentExtractionResult {
@@ -57,11 +59,12 @@ export function useDocumentExtraction({
   schemaType,
   text,
   enabled = true,
+  initialJson,
 }: UseDocumentExtractionArgs): UseDocumentExtractionResult {
   const clientRef = useRef<ExtractClient | null>(null);
   const easeRef = useRef<unknown>({});
   const regionsRef = useRef<FieldRegions>({});
-  const [json, setJson] = useState<unknown>(null);
+  const [json, setJson] = useState<unknown>(initialJson ?? null);
   const [regions, setRegions] = useState<FieldRegions>({});
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,22 +77,24 @@ export function useDocumentExtraction({
       schemaType,
       onPatch: (patches: RFC6902Patch) => {
         try {
-          // Fold incoming patches into the running EASE state.
           const fold = applyPatches(easeRef.current, patches);
           easeRef.current = fold.state;
-          // Accumulate source regions (last-writer-wins on duplicate paths).
           const incomingRegions = regionsFromOps(patches);
           if (Object.keys(incomingRegions).length > 0) {
             regionsRef.current = { ...regionsRef.current, ...incomingRegions };
             setRegions(regionsRef.current);
           }
           setStreaming(true);
-          // `decode` requires a Zod schema as its second arg; we pass
-          // a permissive `any` schema so it passes through untouched.
-          setJson(decode(fold.state, PASSTHROUGH));
-        } catch {
-          // Bad patch — ignore and keep prior state. The next batch usually
-          // recovers without resetting.
+          const decoded = decode(fold.state, PASSTHROUGH);
+          // DEBUG: remove once fields panel is confirmed working.
+          console.log("[glyph:extract] patch", {
+            ops: Array.isArray(patches) ? patches.length : 1,
+            easeKeys: Object.keys((fold.state as Record<string,unknown>) ?? {}),
+            decoded,
+          });
+          setJson(decoded);
+        } catch (e) {
+          console.warn("[glyph:extract] patch error", e);
         }
       },
       onError: (err) => {

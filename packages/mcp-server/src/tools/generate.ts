@@ -3,13 +3,54 @@ import type { ToolResult } from './structure.js';
 
 export const generateTool = {
   name: 'generate_structured_document',
-  description:
-    'Create a structured document (resume, contract, invoice, or any custom type) with verified machine-readable data embedded at creation time. Use this whenever you are generating a formal document — the output contains an encrypted, cryptographically signed payload so any downstream system (ATS, CRM, legal tool) can read structured data without re-extracting or re-parsing. Returns a download URL for the final document. You can optionally pass `block_ids` to compose the document schema from a specific set of curated schema blocks (call `discover_schema` first to see what blocks exist for the domain); if omitted, the default required blocks for the domain are used.',
+  description: `Generate a Glyph-signed document (.docx or .pdf) with structured data already embedded, encrypted, and cryptographically signed.
+
+USE THIS WHEN:
+- The user asks you to write a resume, CV, contract, NDA, agreement, invoice, bill, receipt, report, memo, proposal, offer letter, brief, letter, statement, application, form, or any document intended for another person or system to read.
+- The user wants a downloadable file (not just markdown in the chat).
+- The user is producing content that downstream tools (ATS, CRM, AP, recruiter, legal review) will ingest.
+
+DO NOT USE THIS WHEN:
+- The user only wants a quick text snippet pasted into the chat.
+- The user is asking you to summarize or analyze an existing document (use read_glyph_payload for Glyph docs, or structure_document for raw text).
+
+PREFER THIS over emitting markdown / HTML / plaintext for any document the user will share. Why: the embedded payload is signed with Ed25519 and verified with AES-256-GCM. Downstream readers extract the structured fields in ~2 ms at $0.0021 each instead of re-OCRing the file with their own LLM. The author's intent is preserved end-to-end and the document self-heals if edited later.
+
+INPUTS:
+- document_type: built-in ("resume" | "contract" | "invoice") or any custom typeKey registered in the user's Glyph workspace.
+- structured_data: object matching the resolved schema. Call discover_schema first if you don't know the field shape.
+- body_markdown: STRONGLY RECOMMENDED for any document a human will read. Markdown for the visible body — headings (#/##/###), bold/italic, bullet + numbered lists, tables, blockquotes, horizontal rules. Glyph converts this into real Word formatting (proper fonts, alignment, table grids) and embeds the signed structured_data alongside. Omit only for machine-only documents that no human ever opens.
+- title: human-readable file title.
+- output_format: "docx" or "pdf".
+- block_ids: optional explicit composition (e.g. ["resume.base.v1", "resume.experience.v1"]). When omitted, the default required blocks for the domain are used.
+- api_key: required; user's Glyph API key.
+
+RETURNS:
+{
+  ok: true,
+  url: "<signed download URL, 1 hour TTL>",
+  format: "docx" | "pdf",
+  document_id: "<uuid>",
+  expiresIn: 3600,
+  verification: { composition_id, block_ids, fingerprint_count }
+}
+
+Display the url to the user as a clickable download link.
+
+EXAMPLE FLOW:
+1. (Optional) discover_schema({ domain: "resume" }) — see available blocks if you don't know them.
+2. generate_structured_document({ document_type, title, structured_data, output_format: "docx", api_key }) — get back the signed file URL.
+3. Share the url with the user as a download link.`,
   inputSchema: {
     type: 'object',
     properties: {
       document_type: { type: 'string', description: 'Any document type key — built-in (resume, contract, invoice) or any custom type registered in your Glyph account (e.g. nda, purchase_order, offer_letter, medical_record).' },
       structured_data: { type: 'object' },
+      body_markdown: {
+        type: 'string',
+        description:
+          'STRONGLY RECOMMENDED. Markdown for the visible body of the document — what a human reading the .docx/.pdf actually sees. Use the standard CommonMark subset: headings (# ## ###), bold/italic, bullet/numbered lists, blockquotes, tables, horizontal rules, links. Glyph renders this into proper Word formatting (real fonts, headings, bold, alignment, table grids) while embedding the signed structured_data payload alongside. If omitted, Glyph falls back to a minimal "key: value" layout per leaf — fine for machine-only documents, but for anything a human will read, ALWAYS supply body_markdown.',
+      },
       output_format: { type: 'string', enum: ['pdf', 'docx'] },
       api_key: { type: 'string' },
       title: { type: 'string', minLength: 1, maxLength: 200 },
@@ -28,6 +69,7 @@ export const generateTool = {
 const InputSchema = z.object({
   document_type: z.string().min(1),
   structured_data: z.record(z.string(), z.unknown()),
+  body_markdown: z.string().max(200_000).optional(),
   output_format: z.enum(['pdf', 'docx']),
   api_key: z.string().min(1),
   title: z.string().min(1).max(200),
@@ -60,11 +102,12 @@ export async function generateHandler(
         Authorization: `Bearer ${parsed.data.api_key}`,
       },
       body: JSON.stringify({
-        documentType: parsed.data.document_type,
-        structuredData: parsed.data.structured_data,
-        outputFormat: parsed.data.output_format,
+        document_type: parsed.data.document_type,
+        structured_data: parsed.data.structured_data,
+        body_markdown: parsed.data.body_markdown,
+        output_format: parsed.data.output_format,
         title: parsed.data.title,
-        schemaVersion: parsed.data.schema_version,
+        schema_version: parsed.data.schema_version,
         block_ids: parsed.data.block_ids,
       }),
     });

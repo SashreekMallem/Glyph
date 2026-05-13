@@ -16,12 +16,18 @@ import {
   discoverSchemaHandler,
   type DiscoverSchemaDeps,
 } from './tools/discoverSchema.js';
+import {
+  proposeSchemaBlockTool,
+  proposeSchemaBlockHandler,
+  type ProposeSchemaBlockDeps,
+} from './tools/proposeSchemaBlock.js';
 
 export interface CreateServerDeps
   extends GenerateDeps,
     StructureDeps,
     ValidateDeps,
-    DiscoverSchemaDeps {
+    DiscoverSchemaDeps,
+    ProposeSchemaBlockDeps {
   readonly glyphApiUrl: string;
 }
 
@@ -36,6 +42,7 @@ export function listTools() {
     generateTool,
     readPayloadTool,
     discoverSchemaTool,
+    proposeSchemaBlockTool,
   ];
 }
 
@@ -61,6 +68,11 @@ export async function dispatchToolCall(
       });
     case 'discover_schema':
       return discoverSchemaHandler(args, {
+        glyphApiUrl: deps.glyphApiUrl,
+        fetch: deps.fetch,
+      });
+    case 'propose_schema_block':
+      return proposeSchemaBlockHandler(args, {
         glyphApiUrl: deps.glyphApiUrl,
         fetch: deps.fetch,
       });

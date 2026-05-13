@@ -4,8 +4,26 @@ import { extractHeuristic } from '../extractor.js';
 
 export const structureTool = {
   name: 'structure_document',
-  description:
-    'Convert raw document text into validated structured JSON. Works with any document type — built-in (resume, contract, invoice) or custom types registered in your Glyph account (nda, offer_letter, purchase_order, etc.). Pass an api_key to use LLM-grade extraction; without it a deterministic heuristic is used for built-in types.',
+  description: `Extract structured JSON from raw document text someone else wrote. Runs Gemini-grade extraction against the schema for the given document type.
+
+USE THIS WHEN:
+- The user pasted raw text (plain text, OCR output, scraped HTML, etc.) and wants it turned into structured fields.
+- You need to analyze a document the user did NOT generate with you.
+
+DO NOT USE THIS WHEN:
+- YOU are writing the document. You already know what you wrote — call generate_structured_document directly with the structured payload you composed. There is no reason to round-trip your own prose through an extraction pass.
+- The document is a Glyph-stamped .docx/.pdf. Use read_glyph_payload instead — it decrypts the embedded payload in ~2 ms with no LLM call.
+
+WHY: This tool exists for human-authored or third-party raw text. Re-extracting your own output wastes tokens, latency, and cost. The whole point of Glyph is that authoring and structuring happen together — when YOU are the author, skip the round-trip.
+
+INPUTS:
+- document_type: e.g. "resume", "contract", "invoice", or any custom typeKey.
+- raw_text: the plain text to structure (≥ 10 chars).
+- context: optional hint string passed to the extractor.
+- api_key: optional. With a key you get LLM-grade Gemini extraction. Without it, the deterministic heuristic runs for built-ins only.
+
+RETURNS:
+{ extracted: { ...structured JSON matching the resolved schema... } }`,
   inputSchema: {
     type: 'object',
     properties: {

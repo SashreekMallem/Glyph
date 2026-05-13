@@ -9,8 +9,40 @@ import type { ToolResult } from './structure.js';
 
 export const readPayloadTool = {
   name: 'read_glyph_payload',
-  description:
-    'Read the verified structured data embedded in a Glyph document. Use this when you have a .docx or PDF that was created by Glyph — it contains an encrypted, signed payload that can be read instantly without any LLM extraction. Returns structured JSON plus verification status (signature valid/invalid). Far cheaper and more accurate than re-extracting with an LLM.',
+  description: `Read the structured payload embedded inside a Glyph-stamped .docx or .pdf. Decrypts and verifies the signature locally; calls Glyph's sync endpoint only if drift is detected.
+
+USE THIS WHEN:
+- You have a .docx or .pdf and need its structured fields.
+- The user uploaded a document and asked "what is in this?" or "extract X from this."
+- You need to verify a document's authorship and integrity.
+
+DO NOT USE THIS WHEN:
+- You generated the document yourself in this conversation — you already have the data.
+- The input is raw text, not a file (use structure_document for that).
+
+WHY: A Glyph document carries its own signed structured payload. Reading it takes ~2 ms with no LLM call and yields the EXACT JSON the author signed. Far cheaper and more accurate than re-OCRing or re-extracting with a model.
+
+DRIFT DETECTION: If the document has been edited outside Glyph since signing, this tool detects the drift via per-field SHA-256 fingerprints and calls Glyph's sync endpoint to refresh only the changed fields. The returned data reflects the current state of the document, not the stale embedded snapshot.
+
+INPUTS:
+- format: "docx" | "pdf" | "base64_docx" | "base64_pdf"
+- content: base64-encoded file bytes OR an https:// URL to the document
+- api_key: required for the sync fallback path
+
+RETURNS:
+{
+  verified: true | false,        // signature valid?
+  status: "in_sync" | "synced" | "no_payload",
+  data: { ... structured payload the author signed ... },
+  drift: { changed: [...], added: [...], removed: [...] } | null,
+  document_type: "resume" | "contract" | ...,
+  schema_version: "1.0",
+  signed_at: "<ISO timestamp>",
+  composition_id: "<uuid>" | null,
+  block_ids: [...] | null
+}
+
+If status is "no_payload", the file is not a Glyph document — fall back to structure_document for plain extraction.`,
   inputSchema: {
     type: 'object',
     properties: {

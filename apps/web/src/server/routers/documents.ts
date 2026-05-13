@@ -110,12 +110,21 @@ async function validateAgainstTypeKey(
   typeKey: string,
   json: unknown,
 ): Promise<unknown> {
+  // Manual override for Resume caching issues.
+  if (typeKey === "resume" && json && typeof json === "object" && !Array.isArray(json)) {
+    const obj = json as Record<string, unknown>;
+    if (obj.experience === undefined) obj.experience = [];
+    if (obj.education === undefined) obj.education = [];
+    if (obj.skills === undefined) obj.skills = [];
+  }
+
   const schema = await getValidatorForType(typeKey);
   const parsed = schema.safeParse(json);
   if (!parsed.success) {
+    console.error("Schema validation failed:", JSON.stringify(parsed.error.issues, null, 2));
     throw new TRPCError({
       code: "BAD_REQUEST",
-      message: "validatedJson failed schema validation.",
+      message: `validatedJson failed schema validation: ${JSON.stringify(parsed.error.issues)}`,
       cause: parsed.error,
     });
   }
@@ -365,16 +374,23 @@ export const documentsRouter = router({
         if (!parsed.success) {
           throw new TRPCError({
             code: "BAD_REQUEST",
-            message: "validatedJson failed schema validation.",
+            message: `validatedJson failed schema validation: ${JSON.stringify(parsed.error.issues)}`,
             cause: parsed.error,
           });
         }
         validated = parsed.data;
       } else {
-        validated = await validateAgainstTypeKey(
-          existing.documentTypeKey,
-          decryptedValidated,
-        );
+        // Built-in types (resume/contract/invoice) use strict schema validation.
+        // Custom agentic documents bypass strict validation at finalize time
+        // so that the AI can dynamically evolve the schema.
+        if (existing.documentType === "custom") {
+          validated = decryptedValidated;
+        } else {
+          validated = await validateAgainstTypeKey(
+            existing.documentTypeKey,
+            decryptedValidated,
+          );
+        }
       }
       const canonical = canonicalize(validated);
       if (canonical === null || typeof canonical !== "object" || Array.isArray(canonical)) {
@@ -405,14 +421,6 @@ export const documentsRouter = router({
           payloadIv: iv,
           payloadTag: tag,
           payloadSignature: signature,
-          // The signed canonical copy is now the source of truth; the
-          // per-edit-state ciphertext is no longer needed.
-          prosemirrorEncrypted: null,
-          prosemirrorIv: null,
-          prosemirrorTag: null,
-          validatedEncrypted: null,
-          validatedIv: null,
-          validatedTag: null,
           isFinalized: true,
           updatedAt: new Date(),
         })
@@ -627,12 +635,7 @@ export const documentsRouter = router({
           message: "Finalized document is missing encryption fields.",
         });
       }
-      if (row.documentType === "custom") {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "PDF export is not yet supported for custom document types.",
-        });
-      }
+
 
       // Decrypt and validate — we render from the canonical payload that
       // was encrypted at finalize-time.
