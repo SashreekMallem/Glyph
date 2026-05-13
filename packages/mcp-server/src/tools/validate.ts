@@ -18,7 +18,6 @@ INPUTS:
 - document_type: built-in or custom typeKey.
 - structured_data: object to validate.
 - block_ids: optional composition (same as generate_structured_document).
-- api_key: required for custom types.
 
 RETURNS:
 { valid: true } on success, or
@@ -33,10 +32,6 @@ PREFER this as a cheap pre-flight check before generate_structured_document if y
         description: 'Any document type key — built-in (resume, contract, invoice) or any custom type registered in your Glyph account (e.g. nda, offer_letter, purchase_order).',
       },
       structured_data: { type: 'object' },
-      api_key: {
-        type: 'string',
-        description: 'Required for custom document types to fetch their schema from your Glyph account.',
-      },
       block_ids: {
         type: 'array',
         items: { type: 'string' },

@@ -20,7 +20,6 @@ INPUTS:
 - document_type: e.g. "resume", "contract", "invoice", or any custom typeKey.
 - raw_text: the plain text to structure (≥ 10 chars).
 - context: optional hint string passed to the extractor.
-- api_key: optional. With a key you get LLM-grade Gemini extraction. Without it, the deterministic heuristic runs for built-ins only.
 
 RETURNS:
 { extracted: { ...structured JSON matching the resolved schema... } }`,
@@ -33,7 +32,6 @@ RETURNS:
       },
       raw_text: { type: 'string', minLength: 10 },
       context: { type: 'string' },
-      api_key: { type: 'string' },
     },
     required: ['document_type', 'raw_text'],
   },

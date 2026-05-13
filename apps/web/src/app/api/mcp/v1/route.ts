@@ -323,9 +323,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const auth = await authenticate(req);
   if ("error" in auth) return auth.error;
 
+  const bearerToken = parseBearer(req.headers.get("authorization")) ?? undefined;
   const deps: CreateServerDeps = {
     glyphApiUrl: deriveGlyphApiUrl(req),
     fetch: globalThis.fetch.bind(globalThis),
+    bearerToken,
   };
 
   const accept = req.headers.get("accept") ?? "";

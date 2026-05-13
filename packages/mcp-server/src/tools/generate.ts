@@ -23,7 +23,6 @@ INPUTS:
 - title: human-readable file title.
 - output_format: "docx" or "pdf".
 - block_ids: optional explicit composition (e.g. ["resume.base.v1", "resume.experience.v1"]). When omitted, the default required blocks for the domain are used.
-- api_key: required; user's Glyph API key.
 
 RETURNS:
 {
@@ -39,7 +38,7 @@ Display the url to the user as a clickable download link.
 
 EXAMPLE FLOW:
 1. (Optional) discover_schema({ domain: "resume" }) — see available blocks if you don't know them.
-2. generate_structured_document({ document_type, title, structured_data, output_format: "docx", api_key }) — get back the signed file URL.
+2. generate_structured_document({ document_type, title, structured_data, output_format: "docx" }) — get back the signed file URL.
 3. Share the url with the user as a download link.`,
   inputSchema: {
     type: 'object',
@@ -52,7 +51,6 @@ EXAMPLE FLOW:
           'STRONGLY RECOMMENDED. Markdown for the visible body of the document — what a human reading the .docx/.pdf actually sees. Use the standard CommonMark subset: headings (# ## ###), bold/italic, bullet/numbered lists, blockquotes, tables, horizontal rules, links. Glyph renders this into proper Word formatting (real fonts, headings, bold, alignment, table grids) while embedding the signed structured_data payload alongside. If omitted, Glyph falls back to a minimal "key: value" layout per leaf — fine for machine-only documents, but for anything a human will read, ALWAYS supply body_markdown.',
       },
       output_format: { type: 'string', enum: ['pdf', 'docx'] },
-      api_key: { type: 'string' },
       title: { type: 'string', minLength: 1, maxLength: 200 },
       schema_version: { type: 'string' },
       block_ids: {
@@ -62,7 +60,7 @@ EXAMPLE FLOW:
           'Optional explicit list of schema block ids to compose (e.g. ["resume.base.v1", "resume.experience.v1", "resume.projects.v1"]). If omitted, the default required blocks for the domain are used. Use discover_schema first to see available blocks.',
       },
     },
-    required: ['document_type', 'structured_data', 'output_format', 'api_key', 'title'],
+    required: ['document_type', 'structured_data', 'output_format', 'title'],
   },
 } as const;
 

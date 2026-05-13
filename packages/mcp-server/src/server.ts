@@ -29,6 +29,14 @@ export interface CreateServerDeps
     DiscoverSchemaDeps,
     ProposeSchemaBlockDeps {
   readonly glyphApiUrl: string;
+  /**
+   * Bearer token used to authorize sub-requests to /api/v1/*. When set
+   * (HTTPS/SSE transport, after the route authenticates the caller),
+   * tools authorize automatically and don't need the AI to pass `api_key`
+   * as an argument. When unset (stdio transport), the AI must still
+   * provide `api_key` in the tool args.
+   */
+  readonly bearerToken?: string;
 }
 
 /**
@@ -51,28 +59,37 @@ export async function dispatchToolCall(
   args: unknown,
   deps: CreateServerDeps,
 ) {
+  // When the HTTPS transport already authenticated the caller, inject the
+  // bearer token into args so tool handlers can authorize sub-requests
+  // without the AI having to pass `api_key`. AI-provided `api_key` (stdio
+  // path) still wins if present.
+  const argsWithAuth =
+    deps.bearerToken && args && typeof args === 'object' && !Array.isArray(args)
+      ? { api_key: deps.bearerToken, ...(args as Record<string, unknown>) }
+      : args;
+
   switch (name) {
     case 'structure_document':
-      return structureHandler(args, {
+      return structureHandler(argsWithAuth, {
         glyphApiUrl: deps.glyphApiUrl,
         fetch: deps.fetch,
       });
     case 'validate_document':
-      return validateHandler(args, { glyphApiUrl: deps.glyphApiUrl, fetch: deps.fetch });
+      return validateHandler(argsWithAuth, { glyphApiUrl: deps.glyphApiUrl, fetch: deps.fetch });
     case 'generate_structured_document':
-      return generateHandler(args, deps);
+      return generateHandler(argsWithAuth, deps);
     case 'read_glyph_payload':
-      return readPayloadHandler(args, {
+      return readPayloadHandler(argsWithAuth, {
         fetch: deps.fetch,
         glyphApiUrl: deps.glyphApiUrl,
       });
     case 'discover_schema':
-      return discoverSchemaHandler(args, {
+      return discoverSchemaHandler(argsWithAuth, {
         glyphApiUrl: deps.glyphApiUrl,
         fetch: deps.fetch,
       });
     case 'propose_schema_block':
-      return proposeSchemaBlockHandler(args, {
+      return proposeSchemaBlockHandler(argsWithAuth, {
         glyphApiUrl: deps.glyphApiUrl,
         fetch: deps.fetch,
       });

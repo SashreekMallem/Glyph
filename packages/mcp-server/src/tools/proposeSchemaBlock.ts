@@ -26,7 +26,6 @@ INPUTS:
 - proposed_name: short human-readable name (e.g. "Patient Visit").
 - proposed_json_schema: JSON Schema Draft 7 object with type:"object", properties:{}, and required:[] populated.
 - rationale: 1-2 sentences explaining the use case (optional).
-- api_key: required.
 
 RETURNS:
 { proposal_id, status: "pending", domain, message }
@@ -39,9 +38,8 @@ The proposal lands in Glyph's review queue. Once approved (usually <24h for sens
       proposed_name: { type: 'string', minLength: 1, maxLength: 80 },
       proposed_json_schema: { type: 'object' },
       rationale: { type: 'string', maxLength: 500 },
-      api_key: { type: 'string' },
     },
-    required: ['domain', 'proposed_name', 'proposed_json_schema', 'api_key'],
+    required: ['domain', 'proposed_name', 'proposed_json_schema'],
   },
 } as const;
 

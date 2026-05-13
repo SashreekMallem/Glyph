@@ -27,7 +27,6 @@ DRIFT DETECTION: If the document has been edited outside Glyph since signing, th
 INPUTS:
 - format: "docx" | "pdf" | "base64_docx" | "base64_pdf"
 - content: base64-encoded file bytes OR an https:// URL to the document
-- api_key: required for the sync fallback path
 
 RETURNS:
 {
@@ -54,9 +53,8 @@ If status is "no_payload", the file is not a Glyph document — fall back to str
         type: 'string',
         description: 'Base64-encoded file bytes OR https:// URL to the document',
       },
-      api_key: { type: 'string' },
     },
-    required: ['format', 'content', 'api_key'],
+    required: ['format', 'content'],
   },
 } as const;
 

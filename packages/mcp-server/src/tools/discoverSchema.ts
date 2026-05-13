@@ -17,7 +17,6 @@ WHY: Calling discover_schema first means you fill the structured_data correctly 
 
 INPUTS:
 - domain: e.g. "resume", "contract", "invoice", or any custom domain key.
-- api_key: required.
 
 RETURNS:
 {
@@ -38,9 +37,8 @@ If the returned list is empty for a domain, consider calling propose_schema_bloc
         description:
           'Document domain (resume, contract, invoice, or any custom domain registered in your account).',
       },
-      api_key: { type: 'string' },
     },
-    required: ['domain', 'api_key'],
+    required: ['domain'],
   },
 } as const;
 
