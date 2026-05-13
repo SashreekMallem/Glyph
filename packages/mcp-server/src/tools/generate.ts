@@ -29,26 +29,29 @@ INPUTS:
 RETURNS:
 {
   ok: true,
-  url: "<signed download URL, 1 hour TTL>",
-  file_base64: "<base64-encoded file bytes>",
+  file_base64: "<base64 of the COMPLETE file bytes — this IS the file>",
+  file_base64_is_complete: true,
   filename: "<title>.docx" | "<title>.pdf",
   format: "docx" | "pdf",
   document_id: "<uuid>",
-  expiresIn: 3600,
-  verification: { composition_id, block_ids, fingerprint_count }
+  share_url: "<signed URL, 1 hour TTL — for forwarding only, NOT for fetching bytes>",
+  share_url_expires_in_seconds: 3600
 }
 
-AFTER CALLING THIS TOOL (mandatory follow-up for inline display):
-1. Decode \`file_base64\` and write it to \`/mnt/user-data/outputs/<filename>\` using your filesystem/bash capability (e.g. node fs.writeFileSync, Python base64.b64decode + write, or \`echo "<b64>" | base64 -d > /mnt/user-data/outputs/<filename>\`).
-2. Call \`present_files\` (or your host's equivalent) on that path so the user sees an inline preview + download chip — not just a raw URL.
-3. Also share the \`url\` so the user can forward/email the link directly.
+AFTER CALLING THIS TOOL (mandatory inline display flow):
+1. Write \`file_base64\` directly to \`/mnt/user-data/outputs/<filename>\` using your filesystem capability. The base64 string IS the entire file — do NOT curl/fetch share_url to get the bytes, that would be a wasted round-trip and may stall the chat.
+   - Node:   fs.writeFileSync(path, Buffer.from(file_base64, 'base64'))
+   - Python: open(path,'wb').write(base64.b64decode(file_base64))
+   - Bash:   echo "<file_base64>" | base64 -d > <path>
+2. Call \`present_files\` (or your host's equivalent inline-file display) on that path so the user sees a preview + download chip.
+3. After present_files succeeds, also post \`share_url\` as a clickable link so the user can forward / email the document directly.
 
-If \`present_files\` is unavailable in the host, still write the file to /mnt/user-data/outputs/<filename> so any attached file-browser can surface it, AND show the url as a clickable download link.
+If \`present_files\` is unavailable, still write the file to /mnt/user-data/outputs/<filename> so the host's file browser can surface it, AND post share_url. Never fall back to "just paste the share_url" — the user expects the file inline.
 
 EXAMPLE FLOW:
 1. (Optional) discover_schema({ domain: "resume" }) — see available blocks if you don't know them.
-2. generate_structured_document({ document_type, title, structured_data, output_format: "docx" }) — receive { url, file_base64, filename, ... }.
-3. Decode file_base64 -> /mnt/user-data/outputs/<filename>, call present_files, then post the url alongside.`,
+2. generate_structured_document({ document_type, title, structured_data, output_format: "docx" }) — receive { file_base64, filename, share_url, ... }.
+3. Write file_base64 -> /mnt/user-data/outputs/<filename>. Call present_files. Post share_url.`,
   inputSchema: {
     type: 'object',
     properties: {
@@ -132,25 +135,32 @@ export async function generateHandler(
       fileBase64?: string;
       filename?: string;
     };
+    const filename = data.filename ?? 'document';
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify({
             ok: true,
-            url: data.downloadUrl,
+            // file_base64 is the CANONICAL file bytes. Listed first and
+            // marked complete so the host model writes them directly
+            // instead of curling the share URL.
             file_base64: data.fileBase64,
-            filename: data.filename,
+            file_base64_is_complete: true,
+            filename,
             format: parsed.data.output_format,
             document_id: data.documentId,
-            expires_in_seconds: data.expiresIn,
-            // Hint to the host model: write the base64 to
-            // /mnt/user-data/outputs/<filename> and call present_files
-            // (or your host's equivalent) for inline display.
+            // share URL — for the user to forward/email AFTER presenting
+            // the file. Never use this to fetch the bytes; file_base64
+            // already contains them.
+            share_url: data.downloadUrl,
+            share_url_expires_in_seconds: data.expiresIn,
             display_hint:
-              'Decode file_base64 to /mnt/user-data/outputs/' +
-              (data.filename ?? 'document') +
-              ' and call present_files; also show the url as a clickable download link.',
+              "MANDATORY: write file_base64 (already complete bytes — do NOT curl share_url to refetch) " +
+              "to /mnt/user-data/outputs/" + filename +
+              " using your filesystem capability (fs.writeFileSync(path, Buffer.from(file_base64, 'base64')) " +
+              "in Node, base64.b64decode + open().write() in Python), then call present_files on that path. " +
+              "After present_files, post share_url as a clickable link for the user to forward.",
           }),
         },
       ],
