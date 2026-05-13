@@ -61,8 +61,15 @@ function parseBearer(header: string | null): string | null {
   return m?.[1] ?? null;
 }
 
+function deriveOrigin(req: NextRequest): string {
+  const fwdHost = req.headers.get("x-forwarded-host");
+  const fwdProto = req.headers.get("x-forwarded-proto") ?? "https";
+  if (fwdHost) return `${fwdProto}://${fwdHost}`;
+  return new URL(req.url).origin;
+}
+
 function buildWwwAuthenticate(req: NextRequest): string {
-  const origin = new URL(req.url).origin;
+  const origin = deriveOrigin(req);
   return `Bearer realm="glyph-mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource"`;
 }
 
@@ -145,7 +152,7 @@ async function authenticate(
 
 function deriveGlyphApiUrl(req: NextRequest): string {
   // Same-origin so the tool handlers can self-call our other endpoints.
-  return new URL(req.url).origin;
+  return deriveOrigin(req);
 }
 
 async function handleJsonRpc(
@@ -361,7 +368,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     version: SERVER_VERSION,
     description:
       "Generate signed, structured documents whose payload downstream consumers read for free.",
-    url: new URL("/api/mcp/v1", new URL(req.url).origin).toString(),
+    url: new URL("/api/mcp/v1", deriveOrigin(req)).toString(),
     auth: {
       type: "bearer",
       instructions: "Get an API key at /settings/api-keys",
