@@ -32,11 +32,7 @@ export function BubbleMenu({ editor }: { editor: any }) {
   };
 
   return (
-    <TiptapBubbleMenu
-      editor={editor}
-      tippyOptions={{ duration: 100 }}
-      className="bubble-menu"
-    >
+    <TiptapBubbleMenu editor={editor} className="bubble-menu">
       <button
         onClick={() => editor.chain().focus().toggleBold().run()}
         className={editor.isActive("bold") ? "is-active" : ""}

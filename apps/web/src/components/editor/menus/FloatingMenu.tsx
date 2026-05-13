@@ -11,11 +11,7 @@ export function FloatingMenu({ editor }: { editor: any }) {
   if (!editor) return null;
 
   return (
-    <TiptapFloatingMenu
-      editor={editor}
-      tippyOptions={{ duration: 100 }}
-      className="floating-menu"
-    >
+    <TiptapFloatingMenu editor={editor} className="floating-menu">
       <button
         onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
         className={editor.isActive("heading", { level: 1 }) ? "is-active" : ""}
