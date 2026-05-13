@@ -30,6 +30,20 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   outputFileTracingRoot: path.join(__dirname, "../.."),
+  transpilePackages: [
+    "@tiptap/core",
+    "@tiptap/pm",
+    "@tiptap/react",
+    "@tiptap/starter-kit",
+    "@tiptap/extensions",
+    "@tiptap/suggestion",
+    "@tiptap/markdown",
+    "prosemirror-commands",
+    "prosemirror-state",
+    "prosemirror-view",
+    "prosemirror-model",
+    "prosemirror-transform",
+  ],
   async headers() {
     return [
       {

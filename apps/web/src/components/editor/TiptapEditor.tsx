@@ -24,7 +24,6 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import { BubbleMenu as BubbleMenuWrapper, FloatingMenu as FloatingMenuWrapper } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Link from "@tiptap/extension-link";
-import Underline from "@tiptap/extension-underline";
 import Subscript from "@tiptap/extension-subscript";
 import Superscript from "@tiptap/extension-superscript";
 import TextAlign from "@tiptap/extension-text-align";
@@ -149,7 +148,6 @@ export function TiptapEditor({
           emptyEditorClass:
             "before:content-[attr(data-placeholder)] before:float-left before:text-neutral-400 before:italic before:pointer-events-none before:h-0",
         }),
-        Underline,
         Subscript,
         Superscript,
         TextAlign.configure({
