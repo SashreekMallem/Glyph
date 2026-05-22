@@ -8,8 +8,10 @@ import {
   documents,
   documentTypes,
   spanCorrections,
+  styleProfiles,
   type Document,
 } from "@/db/schema";
+import { StyleProfileSchema, type StyleProfile } from "@glyph/style-profile";
 import { protectedProcedure, rateLimited, router } from "../trpc";
 import { toDocumentDTO } from "../dto";
 import { canonicalize } from "@/lib/canonicalize";
@@ -59,6 +61,13 @@ const DocumentDTOSchema = z.object({
   payloadIv: z.string().nullable().optional(),
   payloadTag: z.string().nullable().optional(),
   payloadSignature: z.string().nullable().optional(),
+  /**
+   * Decrypted visual style sidecar (see @glyph/style-profile). Absent
+   * when the document has no profile attached or when the on-disk JSON
+   * fails schema validation — callers fall back to GLYPH_MODERN_PROFILE
+   * in either case.
+   */
+  styleProfile: StyleProfileSchema.optional(),
 });
 
 /**
@@ -86,6 +95,38 @@ async function decryptColumn(
     return (decoded as { v: unknown }).v;
   }
   return decoded;
+}
+
+/**
+ * Decrypt the style-profile column triple (or return `undefined` if any
+ * column is null / the JSON fails schema validation). Used by `get` /
+ * `list` so the editor can render an author-specified style profile.
+ * Validation failure is intentionally swallowed — the caller treats the
+ * profile as absent and falls back to `GLYPH_MODERN_PROFILE` in the UI.
+ */
+async function decryptStyleProfile(
+  encrypted: string | null,
+  iv: string | null,
+  tag: string | null,
+): Promise<StyleProfile | undefined> {
+  if (encrypted === null || iv === null || tag === null) {
+    return undefined;
+  }
+  try {
+    const decoded = (await decryptPayload(encrypted, iv, tag)) as
+      | { __wrapped?: true; v?: unknown }
+      | Record<string, unknown>;
+    const candidate =
+      decoded &&
+      typeof decoded === "object" &&
+      (decoded as { __wrapped?: boolean }).__wrapped === true
+        ? (decoded as { v: unknown }).v
+        : decoded;
+    const parsed = StyleProfileSchema.safeParse(candidate);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Wrap non-object payloads so AES-GCM (which requires an object) can encrypt them. */
@@ -141,6 +182,47 @@ async function validateAgainstTypeKey(
   return parsed.data;
 }
 
+/**
+ * Look up a user's style-profile-library row, decrypt + validate it.
+ * Throws NOT_FOUND on missing/foreign rows, INTERNAL on malformed JSON.
+ * Shared by `create` and `setStyleProfile`.
+ */
+async function loadOwnedStyleProfile(
+  styleProfileId: string,
+  userId: string,
+): Promise<StyleProfile> {
+  const [profRow] = await db
+    .select()
+    .from(styleProfiles)
+    .where(
+      and(
+        eq(styleProfiles.id, styleProfileId),
+        eq(styleProfiles.userId, userId),
+      ),
+    )
+    .limit(1);
+  if (!profRow) {
+    throw new TRPCError({
+      code: "NOT_FOUND",
+      message: "Style profile not found.",
+    });
+  }
+  const decoded = await decryptPayload(
+    profRow.profileEncrypted,
+    profRow.profileIv,
+    profRow.profileTag,
+  );
+  const parsed = StyleProfileSchema.safeParse(decoded);
+  if (!parsed.success) {
+    throw new TRPCError({
+      code: "INTERNAL_SERVER_ERROR",
+      message: "Stored style profile failed schema validation.",
+      cause: parsed.error,
+    });
+  }
+  return parsed.data;
+}
+
 export const documentsRouter = router({
   create: protectedProcedure
     .use(perUserWrite)
@@ -153,6 +235,14 @@ export const documentsRouter = router({
         typeKey: z.string().min(1).max(80),
         title: z.string().min(1).max(200),
         templateId: z.string().uuid().optional(),
+        /**
+         * Optional brand profile (from the `style_profiles` library) to
+         * pre-apply. Verified against caller ownership, then re-encrypted
+         * onto the document's own columns — the library row stays
+         * untouched, so later renames/deletes don't retroactively
+         * re-style created documents.
+         */
+        styleProfileId: z.string().uuid().optional(),
       }),
     )
     .output(DocumentDTOSchema)
@@ -173,6 +263,25 @@ export const documentsRouter = router({
         throw new TRPCError({ code: "FORBIDDEN" });
       }
 
+      // Resolve + copy-encrypt the chosen brand profile, if any. We
+      // re-encrypt rather than reuse the library row's ciphertext so
+      // each document carries its own IV/tag — master-key rotations
+      // never have to chase cross-table refs.
+      let styleProfileEncrypted: string | null = null;
+      let styleProfileIv: string | null = null;
+      let styleProfileTag: string | null = null;
+      let resolvedStyleProfile: StyleProfile | undefined;
+      if (input.styleProfileId) {
+        resolvedStyleProfile = await loadOwnedStyleProfile(
+          input.styleProfileId,
+          ctx.user.id,
+        );
+        const enc = await encryptPayload(resolvedStyleProfile);
+        styleProfileEncrypted = enc.encrypted;
+        styleProfileIv = enc.iv;
+        styleProfileTag = enc.tag;
+      }
+
       // `documents.documentType` is the coarse renderer/category column;
       // `documents.documentTypeKey` is the precise key into
       // `document_types`. With every schema now in the DB, the coarse
@@ -186,6 +295,9 @@ export const documentsRouter = router({
           documentTypeKey: input.typeKey,
           templateId: input.templateId ?? null,
           schemaVersion: typeRow.schemaVersion,
+          styleProfileEncrypted,
+          styleProfileIv,
+          styleProfileTag,
         })
         .returning();
       if (!row) {
@@ -199,7 +311,62 @@ export const documentsRouter = router({
         includeValidatedJson: true,
         prosemirrorState: null,
         validatedJson: null,
+        styleProfile: resolvedStyleProfile,
       });
+    }),
+
+  /**
+   * Apply (or clear) a saved brand profile on an existing document. The
+   * library row is the source of truth — we copy-encrypt its plaintext
+   * into the document's own `style_profile_*` columns so subsequent
+   * library edits don't retroactively re-style finalized documents.
+   * Omit `styleProfileId` to revert to the GLYPH_MODERN default.
+   */
+  setStyleProfile: protectedProcedure
+    .use(perUserWrite)
+    .input(
+      z.object({
+        docId: z.string().uuid(),
+        styleProfileId: z.string().uuid().optional(),
+      }),
+    )
+    .output(z.object({ ok: z.literal(true) }))
+    .mutation(async ({ ctx, input }) => {
+      // Defensive ownership check — RLS would also block, but a typed
+      // NOT_FOUND is friendlier than a transport-level error.
+      await findOwned(input.docId, ctx.user.id);
+
+      let encrypted: string | null = null;
+      let iv: string | null = null;
+      let tag: string | null = null;
+
+      if (input.styleProfileId) {
+        const profile = await loadOwnedStyleProfile(
+          input.styleProfileId,
+          ctx.user.id,
+        );
+        const enc = await encryptPayload(profile);
+        encrypted = enc.encrypted;
+        iv = enc.iv;
+        tag = enc.tag;
+      }
+
+      await db
+        .update(documents)
+        .set({
+          styleProfileEncrypted: encrypted,
+          styleProfileIv: iv,
+          styleProfileTag: tag,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(documents.id, input.docId),
+            eq(documents.userId, ctx.user.id),
+          ),
+        );
+
+      return { ok: true as const };
     }),
 
   save: protectedProcedure
@@ -297,10 +464,16 @@ export const documentsRouter = router({
         row.validatedIv,
         row.validatedTag,
       );
+      const styleProfile = await decryptStyleProfile(
+        row.styleProfileEncrypted,
+        row.styleProfileIv,
+        row.styleProfileTag,
+      );
       return toDocumentDTO(row, {
         includeValidatedJson: true,
         prosemirrorState,
         validatedJson,
+        styleProfile,
       });
     }),
 

@@ -24,6 +24,11 @@ import { deflateRawSync } from "node:zlib";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { encryptPayload, signPayload } from "@glyph/crypto";
+import {
+  GLYPH_MODERN_PROFILE,
+  StyleProfileSchema,
+  type StyleProfile,
+} from "@glyph/style-profile";
 
 import { authenticateApiKey } from "@/lib/api-key-auth";
 import { attachMeta, buildMeta } from "@/lib/payload-meta";
@@ -43,6 +48,7 @@ interface GenerateBody {
   readonly schema_version?: unknown;
   readonly schemaVersion?: unknown;
   readonly block_ids?: unknown;
+  readonly style_profile?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +499,29 @@ export async function POST(req: NextRequest) {
     blockIds: resolved.blockIds,
   };
 
+  // ---------------------------------------------------------------------
+  // Style profile resolution.
+  //
+  // 1. If the request body carries `style_profile`, validate it against
+  //    StyleProfileSchema. A schema failure is a soft error: fall back
+  //    to the default rather than 422'ing the entire request, because
+  //    style is cosmetic — the structured payload is the load-bearing
+  //    artifact.
+  // 2. Phase A.2 will wire the document's saved profile here when the
+  //    MCP call ties to a stored document. For MCP-generated documents
+  //    today (no DB row), step 2 is a no-op.
+  // 3. Otherwise use `GLYPH_MODERN_PROFILE`.
+  // ---------------------------------------------------------------------
+  let resolvedProfile: StyleProfile = GLYPH_MODERN_PROFILE;
+  if (body.style_profile !== undefined && body.style_profile !== null) {
+    const profileParsed = StyleProfileSchema.safeParse(body.style_profile);
+    if (profileParsed.success) {
+      resolvedProfile = profileParsed.data;
+    }
+    // Silent fallback on failure: an unparseable style_profile must
+    // not block a generation request.
+  }
+
   let fileBytes: Buffer;
   let contentType: string;
   let ext: string;
@@ -511,24 +540,31 @@ export async function POST(req: NextRequest) {
       const { renderMarkdownToDocx, injectGlyphCustomXml } = await import(
         "@/lib/docx/markdown-to-docx"
       );
-      const baseDocx = await renderMarkdownToDocx({ title, bodyMarkdown });
+      const baseDocx = await renderMarkdownToDocx({
+        title,
+        bodyMarkdown,
+        styleProfile: resolvedProfile,
+      });
       const customXml = buildStructuredXml(payloadMeta);
       fileBytes = injectGlyphCustomXml({ docxBytes: baseDocx, customXml });
     } else {
       // FALLBACK PATH: no markdown — minimal `path: value` layout. Useful
       // for machine-only documents; ugly for humans (see MCP tool
       // description — body_markdown is strongly recommended).
+      // Note: the minimal buildDocx() path is unstyled by design — it
+      // exists only for machine-only docs. Style profile is dropped here.
       fileBytes = buildDocx(title, payloadMeta);
     }
 
     contentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     ext = "docx";
   } else {
-    // PDF path — unchanged
+    // PDF path — now respects the resolved style profile.
     const { generatePdf } = await import("@/lib/pdf");
     const pdfBytes = await generatePdf({
       document,
       xmp: payloadMeta,
+      styleProfile: resolvedProfile,
     });
     fileBytes = Buffer.from(pdfBytes);
     contentType = "application/pdf";

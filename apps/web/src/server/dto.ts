@@ -6,6 +6,7 @@
  * plaintext is `POST /api/v1/extract` via a valid API key.
  */
 
+import type { StyleProfile } from "@glyph/style-profile";
 import type { ApiKey, Document } from "@/db/schema";
 
 export interface DocumentDTO {
@@ -30,6 +31,12 @@ export interface DocumentDTO {
   payloadIv?: string | null;
   payloadTag?: string | null;
   payloadSignature?: string | null;
+  /**
+   * Decrypted brand profile attached to this document, if any. Absent
+   * when the document carries no custom profile — clients fall back to
+   * `GLYPH_MODERN_PROFILE` from `@glyph/style-profile`.
+   */
+  styleProfile?: StyleProfile;
 }
 
 export function toDocumentDTO(
@@ -44,6 +51,12 @@ export function toDocumentDTO(
      */
     prosemirrorState?: unknown;
     validatedJson?: unknown;
+    /**
+     * Decrypted style profile, when the router was able to load it. We
+     * keep the column-tuple decrypt out of this helper so non-style
+     * call sites don't pay the cost.
+     */
+    styleProfile?: StyleProfile;
   } = {},
 ): DocumentDTO {
   const dto: DocumentDTO = {
@@ -64,6 +77,9 @@ export function toDocumentDTO(
   dto.payloadIv = doc.payloadIv;
   dto.payloadTag = doc.payloadTag;
   dto.payloadSignature = doc.payloadSignature;
+  if (opts.styleProfile) {
+    dto.styleProfile = opts.styleProfile;
+  }
   return dto;
 }
 

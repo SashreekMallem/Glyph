@@ -212,6 +212,14 @@ async function tryComposeFromBlocks(
   }
 
   composed.properties = properties;
+
+  // Strip `additionalProperties: false` at every level so a partial schema
+  // composition doesn't reject the fields contributed by other blocks.
+  // Also: backfill `description` on leaf fields from the field name when
+  // missing — GLiNER2 uses descriptions as inference hints. A schema with
+  // no descriptions returns 0 spans even on clean text.
+  stripAdditionalProps(composed);
+  backfillDescriptions(composed, []);
   composed.required = [...required];
 
   return {
@@ -220,6 +228,59 @@ async function tryComposeFromBlocks(
     source: "schema_blocks",
     typeKey,
   };
+}
+
+function stripAdditionalProps(node: unknown): void {
+  if (typeof node !== "object" || node === null) return;
+  const obj = node as Record<string, unknown>;
+  if (obj.additionalProperties === false) {
+    delete obj.additionalProperties;
+  }
+  const props = obj.properties;
+  if (typeof props === "object" && props !== null) {
+    for (const v of Object.values(props as Record<string, unknown>)) {
+      stripAdditionalProps(v);
+    }
+  }
+  const items = obj.items;
+  if (typeof items === "object" && items !== null) {
+    stripAdditionalProps(items);
+  }
+}
+
+function humanize(fieldName: string): string {
+  // "graduation_year" -> "Graduation year"
+  return fieldName
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[a-z]/, (c) => c.toUpperCase());
+}
+
+function backfillDescriptions(node: unknown, path: string[]): void {
+  if (typeof node !== "object" || node === null) return;
+  const obj = node as Record<string, unknown>;
+  const props = obj.properties;
+  if (typeof props === "object" && props !== null) {
+    for (const [k, v] of Object.entries(props as Record<string, unknown>)) {
+      if (typeof v === "object" && v !== null) {
+        const child = v as Record<string, unknown>;
+        const t = child.type;
+        // Leaf scalar field with no description -> derive from name.
+        if (
+          (t === "string" || t === "number" || t === "integer" || t === "boolean") &&
+          typeof child.description !== "string"
+        ) {
+          child.description = humanize(k);
+        }
+        backfillDescriptions(child, [...path, k]);
+      }
+    }
+  }
+  const items = obj.items;
+  if (typeof items === "object" && items !== null) {
+    backfillDescriptions(items, path);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,18 +455,26 @@ export async function loadSchema(
   const cached = cacheGet(ck);
   if (cached) return cached;
 
-  // 1. document_types
-  const fromDocumentTypes = await tryDocumentTypes(db, typeKey, userId);
-  if (fromDocumentTypes) {
-    cachePut(ck, fromDocumentTypes);
-    return fromDocumentTypes;
-  }
-
-  // 2. schema_blocks composition
+  // 1. schema_blocks composition.
+  //    Why this is FIRST: schema_blocks is the curated, composable library —
+  //    rich, domain-specific, and grows over time as gap-detector proposes
+  //    new blocks. document_types[key] often holds a thin marker schema (e.g.
+  //    a "custom" placeholder with 3 properties) that would otherwise win
+  //    over a richer block composition. Checking blocks first means whenever
+  //    real coverage exists in the library, GLiNER2 sees it.
   const fromBlocks = await tryComposeFromBlocks(db, typeKey);
   if (fromBlocks) {
     cachePut(ck, fromBlocks);
     return fromBlocks;
+  }
+
+  // 2. document_types — single-row fallback for domains that haven't been
+  //    decomposed into blocks (e.g. user-defined doc types via the Settings
+  //    UI, or the literal `custom` fallback row).
+  const fromDocumentTypes = await tryDocumentTypes(db, typeKey, userId);
+  if (fromDocumentTypes) {
+    cachePut(ck, fromDocumentTypes);
+    return fromDocumentTypes;
   }
 
   // 3. Gemini synthesis (skipped in read-only mode or with no sample text).

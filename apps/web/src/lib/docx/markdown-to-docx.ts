@@ -36,15 +36,16 @@ import {
   type ParagraphChild,
 } from "docx";
 import { unzipSync, zipSync, strFromU8, strToU8 } from "fflate";
+import {
+  GLYPH_MODERN_PROFILE,
+  profileToDocxRun,
+  type StyleProfile,
+} from "@glyph/style-profile";
 
 const marked = new Marked({
   gfm: true,
   breaks: false,
 });
-
-const SERIF_FONT = "Georgia";
-const SANS_FONT = "Aptos";
-const MONO_FONT = "JetBrains Mono";
 
 const NUMBERING_REF = "glyph-ordered";
 
@@ -74,6 +75,12 @@ export interface RenderDocxOptions {
   readonly title: string;
   /** Markdown body the AI generated. */
   readonly bodyMarkdown: string;
+  /**
+   * Visual style profile. When omitted, Glyph Modern is used — the
+   * built-in default that preserves the pre-Phase-B "Georgia + emerald"
+   * look. Pass the document's saved profile to keep exports on-brand.
+   */
+  readonly styleProfile?: StyleProfile;
 }
 
 /**
@@ -84,20 +91,31 @@ export interface RenderDocxOptions {
 export async function renderMarkdownToDocx(
   opts: RenderDocxOptions,
 ): Promise<Buffer> {
+  const profile = opts.styleProfile ?? GLYPH_MODERN_PROFILE;
   const tokens = marked.lexer(opts.bodyMarkdown);
   const children: (Paragraph | Table)[] = [];
 
-  // Title block — serif, large, centered, with a subtle bottom border.
+  // Title block — heading font, generously sized (≈ h1 * 2 half-points
+  // pushed up by another 20% for visual hierarchy), centered, with a
+  // subtle bottom border the same as the muted color.
+  const h1Run = profileToDocxRun(profile, "h1");
+  const titleSize = Math.round(h1Run.size * 1.2); // half-points
+  const mutedBorderColor = profile.colors.muted.replace(/^#/, "");
   children.push(
     new Paragraph({
       children: [
-        new TextRun({ text: opts.title, size: 56, font: SERIF_FONT, color: "111111" }),
+        new TextRun({
+          text: opts.title,
+          size: titleSize,
+          font: h1Run.font,
+          color: h1Run.color,
+        }),
       ],
       alignment: AlignmentType.CENTER,
       spacing: { before: 0, after: 240 },
       border: {
         bottom: {
-          color: "DDDDDD",
+          color: mutedBorderColor,
           space: 1,
           style: BorderStyle.SINGLE,
           size: 4,
@@ -107,13 +125,22 @@ export async function renderMarkdownToDocx(
   );
 
   for (const token of tokens) {
-    appendToken(token, children, 0);
+    appendToken(token, children, profile, 0);
   }
+
+  // docx-js page margins are in TWENTIETHS of a point (1 pt = 20 dxa).
+  const m = profile.page.margins;
+  const pageMargin = {
+    top: m.top * 20,
+    right: m.right * 20,
+    bottom: m.bottom * 20,
+    left: m.left * 20,
+  };
 
   const doc = new Document({
     creator: "Glyph",
     title: opts.title,
-    styles: defaultStyles(),
+    styles: defaultStyles(profile),
     numbering: {
       config: [
         { reference: NUMBERING_REF, levels: ORDERED_LEVELS },
@@ -122,7 +149,7 @@ export async function renderMarkdownToDocx(
     sections: [
       {
         properties: {
-          page: { margin: { top: 1080, bottom: 1080, left: 1080, right: 1080 } },
+          page: { margin: pageMargin },
         },
         children,
       },
@@ -224,29 +251,30 @@ function nextRelId(rels: string): string {
 function appendToken(
   token: Tokens.Generic,
   children: (Paragraph | Table)[],
+  profile: StyleProfile,
   listDepth: number,
 ): void {
   switch (token.type) {
     case "heading":
-      children.push(renderHeading(token as Tokens.Heading));
+      children.push(renderHeading(token as Tokens.Heading, profile));
       return;
     case "paragraph":
-      children.push(renderParagraph(token as Tokens.Paragraph));
+      children.push(renderParagraph(token as Tokens.Paragraph, profile));
       return;
     case "list":
-      renderList(token as Tokens.List, children, listDepth);
+      renderList(token as Tokens.List, children, profile, listDepth);
       return;
     case "blockquote":
-      renderBlockquote(token as Tokens.Blockquote, children);
+      renderBlockquote(token as Tokens.Blockquote, children, profile);
       return;
     case "code":
-      children.push(renderCodeBlock(token as Tokens.Code));
+      children.push(renderCodeBlock(token as Tokens.Code, profile));
       return;
     case "table":
-      children.push(renderTable(token as Tokens.Table));
+      children.push(renderTable(token as Tokens.Table, profile));
       return;
     case "hr":
-      children.push(renderHr());
+      children.push(renderHr(profile));
       return;
     case "space":
       return;
@@ -257,9 +285,10 @@ function appendToken(
       // Fallback: render the raw text if anything's available.
       const raw = (token as { raw?: string }).raw;
       if (raw && raw.trim().length > 0) {
+        const body = profileToDocxRun(profile, "body");
         children.push(
           new Paragraph({
-            children: [new TextRun({ text: raw.trim(), font: SERIF_FONT, size: 22 })],
+            children: [new TextRun({ text: raw.trim(), ...body })],
           }),
         );
       }
@@ -267,10 +296,25 @@ function appendToken(
   }
 }
 
-function renderHeading(token: Tokens.Heading): Paragraph {
-  const runs = renderInline(token.tokens ?? [], { bold: false });
+function renderHeading(token: Tokens.Heading, profile: StyleProfile): Paragraph {
+  const runs = renderInline(token.tokens ?? [], profile, { bold: false });
   const level = clamp(token.depth, 1, 6);
-  const sizes: Record<number, number> = { 1: 40, 2: 32, 3: 26, 4: 22, 5: 20, 6: 18 };
+  // h1/h2/h3 read sizes directly from the profile; h4-h6 step down
+  // from h3 toward body for the rare deeper-nested heading case.
+  const h1 = profileToDocxRun(profile, "h1");
+  const h2 = profileToDocxRun(profile, "h2");
+  const h3 = profileToDocxRun(profile, "h3");
+  const body = profileToDocxRun(profile, "body");
+  const runForLevel: Record<number, ReturnType<typeof profileToDocxRun>> = {
+    1: h1,
+    2: h2,
+    3: h3,
+    // Below h3 we interpolate toward body so the hierarchy doesn't
+    // collapse into a flat block of identical text.
+    4: { ...h3, size: Math.max(body.size, h3.size - 2) },
+    5: { ...h3, size: Math.max(body.size, h3.size - 4) },
+    6: { ...body, size: body.size },
+  };
   const heading: Record<number, (typeof HeadingLevel)[keyof typeof HeadingLevel]> = {
     1: HeadingLevel.HEADING_1,
     2: HeadingLevel.HEADING_2,
@@ -279,22 +323,23 @@ function renderHeading(token: Tokens.Heading): Paragraph {
     5: HeadingLevel.HEADING_5,
     6: HeadingLevel.HEADING_6,
   };
+  const styled = runForLevel[level] ?? h3;
   return new Paragraph({
     heading: heading[level],
     children: runs.map((r) =>
       new TextRun({
         ...extractRunOptions(r),
-        size: sizes[level],
-        font: SERIF_FONT,
-        color: "111111",
+        size: styled.size,
+        font: styled.font,
+        color: styled.color,
       }),
     ),
     spacing: { before: level <= 2 ? 320 : 200, after: 120 },
   });
 }
 
-function renderParagraph(token: Tokens.Paragraph): Paragraph {
-  const runs = renderInline(token.tokens ?? [], { bold: false });
+function renderParagraph(token: Tokens.Paragraph, profile: StyleProfile): Paragraph {
+  const runs = renderInline(token.tokens ?? [], profile, { bold: false });
   return new Paragraph({
     children: runs,
     spacing: { after: 120 },
@@ -304,10 +349,11 @@ function renderParagraph(token: Tokens.Paragraph): Paragraph {
 function renderList(
   token: Tokens.List,
   children: (Paragraph | Table)[],
+  profile: StyleProfile,
   depth: number,
 ): void {
   for (const item of token.items) {
-    const runs = renderInline(item.tokens ?? [], { bold: false });
+    const runs = renderInline(item.tokens ?? [], profile, { bold: false });
     children.push(
       new Paragraph({
         children: runs,
@@ -322,7 +368,7 @@ function renderList(
     if (item.tokens) {
       for (const sub of item.tokens) {
         if (sub.type === "list") {
-          renderList(sub as Tokens.List, children, depth + 1);
+          renderList(sub as Tokens.List, children, profile, depth + 1);
         }
       }
     }
@@ -332,21 +378,26 @@ function renderList(
 function renderBlockquote(
   token: Tokens.Blockquote,
   children: (Paragraph | Table)[],
+  profile: StyleProfile,
 ): void {
+  // Blockquotes pick up the accent color as their left rule, and the
+  // muted color for the body text — italic stays a stylistic constant.
+  const accent = profile.colors.accent.replace(/^#/, "");
+  const muted = profile.colors.muted.replace(/^#/, "");
   for (const sub of token.tokens ?? []) {
     if (sub.type === "paragraph") {
-      const runs = renderInline((sub as Tokens.Paragraph).tokens ?? [], {
+      const runs = renderInline((sub as Tokens.Paragraph).tokens ?? [], profile, {
         italic: true,
       });
       children.push(
         new Paragraph({
           children: runs.map((r) =>
-            new TextRun({ ...extractRunOptions(r), italics: true, color: "555555" }),
+            new TextRun({ ...extractRunOptions(r), italics: true, color: muted }),
           ),
           indent: { left: 360 },
           border: {
             left: {
-              color: "10B981",
+              color: accent,
               space: 8,
               style: BorderStyle.SINGLE,
               size: 12,
@@ -359,24 +410,23 @@ function renderBlockquote(
   }
 }
 
-function renderCodeBlock(token: Tokens.Code): Paragraph {
+function renderCodeBlock(token: Tokens.Code, profile: StyleProfile): Paragraph {
+  const mono = profileToDocxRun(profile, "mono");
   return new Paragraph({
-    children: [
-      new TextRun({ text: token.text, font: MONO_FONT, size: 20, color: "111111" }),
-    ],
+    children: [new TextRun({ text: token.text, ...mono })],
     shading: { type: ShadingType.CLEAR, color: "auto", fill: "F5F5F4" },
     spacing: { before: 120, after: 160 },
   });
 }
 
-function renderTable(token: Tokens.Table): Table {
+function renderTable(token: Tokens.Table, profile: StyleProfile): Table {
   const rows: TableRow[] = [];
   const headerCells = token.header.map(
     (cell: Tokens.TableCell) =>
       new TableCell({
         children: [
           new Paragraph({
-            children: renderInline(cell.tokens ?? [], { bold: true }),
+            children: renderInline(cell.tokens ?? [], profile, { bold: true }),
           }),
         ],
         shading: { type: ShadingType.CLEAR, color: "auto", fill: "F5F5F4" },
@@ -391,7 +441,9 @@ function renderTable(token: Tokens.Table): Table {
             new TableCell({
               children: [
                 new Paragraph({
-                  children: renderInline(cell.tokens ?? [], { bold: false }),
+                  children: renderInline(cell.tokens ?? [], profile, {
+                    bold: false,
+                  }),
                 }),
               ],
             }),
@@ -405,12 +457,15 @@ function renderTable(token: Tokens.Table): Table {
   });
 }
 
-function renderHr(): Paragraph {
+function renderHr(profile: StyleProfile): Paragraph {
+  // Rule color tracks the profile's muted color so the page tone stays
+  // consistent across themes.
+  const muted = profile.colors.muted.replace(/^#/, "");
   return new Paragraph({
     children: [],
     border: {
       bottom: {
-        color: "DDDDDD",
+        color: muted,
         space: 1,
         style: BorderStyle.SINGLE,
         size: 6,
@@ -433,6 +488,7 @@ interface InlineCtx {
 
 function renderInline(
   tokens: Tokens.Generic[],
+  profile: StyleProfile,
   ctx: InlineCtx,
 ): ParagraphChild[] {
   const out: ParagraphChild[] = [];
@@ -442,35 +498,45 @@ function renderInline(
         const tt = t as Tokens.Text;
         // marked sometimes hands `text` tokens nested children for emphasis
         if (Array.isArray(tt.tokens) && tt.tokens.length > 0) {
-          out.push(...renderInline(tt.tokens, ctx));
+          out.push(...renderInline(tt.tokens, profile, ctx));
         } else {
-          out.push(makeRun(tt.text, ctx));
+          out.push(makeRun(tt.text, profile, ctx));
         }
         break;
       }
       case "strong":
         out.push(
-          ...renderInline((t as Tokens.Strong).tokens ?? [], { ...ctx, bold: true }),
+          ...renderInline((t as Tokens.Strong).tokens ?? [], profile, {
+            ...ctx,
+            bold: true,
+          }),
         );
         break;
       case "em":
         out.push(
-          ...renderInline((t as Tokens.Em).tokens ?? [], { ...ctx, italic: true }),
+          ...renderInline((t as Tokens.Em).tokens ?? [], profile, {
+            ...ctx,
+            italic: true,
+          }),
         );
         break;
-      case "codespan":
+      case "codespan": {
+        const mono = profileToDocxRun(profile, "mono");
         out.push(
           new TextRun({
             text: (t as Tokens.Codespan).text,
-            font: MONO_FONT,
-            size: 20,
+            ...mono,
             shading: { type: ShadingType.CLEAR, color: "auto", fill: "F5F5F4" },
           }),
         );
         break;
+      }
       case "del":
         out.push(
-          ...renderInline((t as Tokens.Del).tokens ?? [], { ...ctx, strike: true }),
+          ...renderInline((t as Tokens.Del).tokens ?? [], profile, {
+            ...ctx,
+            strike: true,
+          }),
         );
         break;
       case "link": {
@@ -478,9 +544,12 @@ function renderInline(
         // docx package supports ExternalHyperlink — but importing it adds
         // complexity. For v1 we render link text + URL inline. Polished
         // hyperlinks can be a follow-up.
-        const inner = renderInline(lt.tokens ?? [], { ...ctx, italic: false });
+        const inner = renderInline(lt.tokens ?? [], profile, {
+          ...ctx,
+          italic: false,
+        });
         out.push(...inner);
-        out.push(makeRun(` (${lt.href})`, { ...ctx, italic: true }));
+        out.push(makeRun(` (${lt.href})`, profile, { ...ctx, italic: true }));
         break;
       }
       case "br":
@@ -491,21 +560,22 @@ function renderInline(
         break;
       default: {
         const raw = (t as { raw?: string }).raw;
-        if (raw) out.push(makeRun(raw, ctx));
+        if (raw) out.push(makeRun(raw, profile, ctx));
       }
     }
   }
   return out;
 }
 
-function makeRun(text: string, ctx: InlineCtx): TextRun {
+function makeRun(text: string, profile: StyleProfile, ctx: InlineCtx): TextRun {
+  // Code spans take the mono treatment; everything else picks up body.
+  const base = profileToDocxRun(profile, ctx.code ? "mono" : "body");
   return new TextRun({
     text,
     bold: ctx.bold,
     italics: ctx.italic,
     strike: ctx.strike,
-    font: ctx.code ? MONO_FONT : SERIF_FONT,
-    size: 22,
+    ...base,
   });
 }
 
@@ -522,26 +592,39 @@ function clamp(n: number, min: number, max: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Default styles — serif body, sans nav, mono code, tight line-height.
+// Default styles — every value is now derived from the StyleProfile so
+// re-exports of a user-saved profile reproduce the author's intent.
 // ---------------------------------------------------------------------------
 
-function defaultStyles() {
+function defaultStyles(profile: StyleProfile) {
+  const body = profileToDocxRun(profile, "body");
+  const h1 = profileToDocxRun(profile, "h1");
+  const h2 = profileToDocxRun(profile, "h2");
+  const h3 = profileToDocxRun(profile, "h3");
+  // docx-js `paragraph.spacing.line` is in 240ths-of-a-line, which is
+  // equivalent to multiplying line-height by 240.
+  const linePacked = Math.round(profile.spacing.line_height * 240);
+  const mutedColor = profile.colors.muted.replace(/^#/, "");
   return {
     default: {
       document: {
-        run: { font: SERIF_FONT, size: 22 },
-        paragraph: { spacing: { line: 300 } },
+        run: { font: body.font, size: body.size, color: body.color },
+        paragraph: { spacing: { line: linePacked } },
       },
-      heading1: { run: { font: SERIF_FONT, bold: false, size: 40, color: "111111" } },
-      heading2: { run: { font: SERIF_FONT, bold: false, size: 32, color: "111111" } },
-      heading3: { run: { font: SERIF_FONT, bold: true, size: 26, color: "111111" } },
+      heading1: { run: { font: h1.font, bold: false, size: h1.size, color: h1.color } },
+      heading2: { run: { font: h2.font, bold: false, size: h2.size, color: h2.color } },
+      heading3: { run: { font: h3.font, bold: true, size: h3.size, color: h3.color } },
     },
     paragraphStyles: [
       {
         id: "Caption",
         name: "Caption",
         basedOn: "Normal",
-        run: { font: SANS_FONT, size: 18, color: "888888" },
+        run: {
+          font: body.font,
+          size: Math.max(profile.sizes.small * 2, 16),
+          color: mutedColor,
+        },
       },
     ],
   } as const;

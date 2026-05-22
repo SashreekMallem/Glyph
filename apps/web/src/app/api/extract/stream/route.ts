@@ -100,47 +100,103 @@ interface GlinerResponse {
 /** Minimum GLiNER2 confidence required to short-circuit Gemini. */
 const GLINER_CONFIDENCE_GATE = 0.85;
 
-/** Hard timeout for the GLiNER2 fast-path call (ms). */
-const GLINER_TIMEOUT_MS = 2_000;
-
 /**
- * Convert a dot-notation path (`"personal.full_name"`, `"items.0.qty"`)
- * to an RFC 6901 JSON pointer (`"/personal/full_name"`, `"/items/0/qty"`).
- * Per spec, `/` and `~` inside path segments are escaped to `~1`/`~0`;
- * GLiNER2 paths are field-keyed so this is mostly belt-and-braces.
+ * Hard timeout for the GLiNER2 fast-path call (ms).
+ *
+ * Real-world ranges we've measured on CPU inference:
+ *   • Tiny schema (3 fields)         → ~800ms warm, ~1.8s cold
+ *   • Composed resume (~30 fields)   → ~5-8s warm, slower cold
+ *
+ * Set generously to absorb the cold-start of the Python service after
+ * the first request. If GLiNER2 exceeds this we silently fall through
+ * to the existing Gemini path, so a long timeout is purely a latency
+ * hit on the fast-path, never a correctness issue.
  */
-function toJsonPointer(dotPath: string): string {
-  const segments = dotPath.split(".");
-  const escaped = segments.map((seg) =>
-    seg.replace(/~/g, "~0").replace(/\//g, "~1"),
-  );
-  return "/" + escaped.join("/");
+const GLINER_TIMEOUT_MS = 15_000;
+
+interface RfcAddOp {
+  readonly op: "add";
+  readonly path: string;
+  readonly value: unknown;
+  readonly srcStart?: number;
+  readonly srcEnd?: number;
 }
 
 /**
- * Project GLiNER2 spans onto an RFC 6902 patch. Every span becomes a
- * single `add` op carrying the source-text offsets so downstream sync
- * (drift detection) can find the field again when the user edits text.
- * Spans are emitted in document-order so the editor's path-by-path
- * highlighter animates cleanly.
+ * Project GLiNER2 spans onto an RFC 6902 patch.
+ *
+ * GLiNER returns dot-notation paths like `personal_info.name` (object
+ * fields) or `experience[0].company` (array entries). We turn each into
+ * a sequence of JSON-pointer steps. A `[N]` suffix is split off as its
+ * own pointer step (the numeric index).
+ *
+ * `applyPatches` (in @glyph/extract) is strict: it throws "Missing key"
+ * when a parent container doesn't already exist. So before every leaf op
+ * we synthesize `add` ops for each intermediate prefix — an array `[]`
+ * if the next step is numeric, an object `{}` otherwise.
+ *
+ * Each prefix is emitted at most once across the whole batch.
  */
 function spansToPatches(
   spans: readonly GlinerSpan[],
-): ReadonlyArray<{
-  op: "add";
-  path: string;
-  value: unknown;
-  srcStart: number;
-  srcEnd: number;
-}> {
-  const sorted = [...spans].sort((a, b) => a.start - b.start);
-  return sorted.map((s) => ({
-    op: "add" as const,
-    path: toJsonPointer(s.path),
-    value: s.value,
-    srcStart: s.start,
-    srcEnd: s.end,
-  }));
+): ReadonlyArray<RfcAddOp> {
+  const emittedPrefixes = new Set<string>();
+  const containerOps: RfcAddOp[] = [];
+  const leafOps: RfcAddOp[] = [];
+
+  // Flatten a dot-path with `[N]` suffixes into pointer steps.
+  // "experience[0].company"  →  ["experience", "0", "company"]
+  function pointerSteps(dotPath: string): string[] {
+    const out: string[] = [];
+    for (const raw of dotPath.split(".")) {
+      const m = /^([^[]+)((?:\[\d+\])*)$/.exec(raw);
+      if (!m) continue;
+      out.push(m[1]!);
+      const brackets = m[2] ?? "";
+      for (const b of brackets.matchAll(/\[(\d+)\]/g)) {
+        out.push(b[1]!);
+      }
+    }
+    return out;
+  }
+
+  function escape(s: string): string {
+    return s.replace(/~/g, "~0").replace(/\//g, "~1");
+  }
+
+  for (const span of [...spans].sort((a, b) => a.start - b.start)) {
+    const steps = pointerSteps(span.path);
+    if (steps.length === 0) continue;
+
+    // Emit parent containers for every prefix [0..n-1].
+    for (let i = 0; i < steps.length - 1; i++) {
+      const prefix = steps.slice(0, i + 1).join("/");
+      if (emittedPrefixes.has(prefix)) continue;
+      emittedPrefixes.add(prefix);
+
+      // Container kind = inferred from the NEXT step:
+      // next is numeric → we're filling an array
+      // next is a name  → we're filling an object
+      const nextStep = steps[i + 1]!;
+      const isArrayChild = /^\d+$/.test(nextStep);
+
+      containerOps.push({
+        op: "add",
+        path: "/" + steps.slice(0, i + 1).map(escape).join("/"),
+        value: isArrayChild ? [] : {},
+      });
+    }
+
+    leafOps.push({
+      op: "add",
+      path: "/" + steps.map(escape).join("/"),
+      value: span.value,
+      srcStart: span.start,
+      srcEnd: span.end,
+    });
+  }
+
+  return [...containerOps, ...leafOps];
 }
 
 /**

@@ -56,9 +56,12 @@ import { ReactRenderer } from "@tiptap/react";
 import tippy from "tippy.js";
 import { common, createLowlight } from "lowlight";
 
+import type { StyleProfile } from "@glyph/style-profile";
+
 import { GlyphFieldMark } from "./extensions";
 import { Toolbar } from "./Toolbar";
 import { FieldsPanel, type ExtractedField } from "./FieldsPanel";
+import { profileToStyleObject } from "./style-vars";
 import { useDocumentExtraction } from "./hooks/useDocumentExtraction";
 import { BubbleMenu } from "./menus/BubbleMenu";
 import { FloatingMenu } from "./menus/FloatingMenu";
@@ -110,6 +113,21 @@ export interface TiptapEditorProps {
     readonly tag?: string;
     readonly signature?: string;
   };
+  /**
+   * Optional visual style profile (fonts/colors/sizes/margins). Surfaces
+   * as CSS custom properties on the editor's outermost wrapper so the
+   * rules in `styles.css` pick up author-specified styling. When omitted,
+   * the CSS variables fall back to their hardcoded defaults which match
+   * the `GLYPH_MODERN_PROFILE` values — so behavior is unchanged for
+   * documents that don't ship a profile yet.
+   */
+  readonly styleProfile?: StyleProfile;
+  /**
+   * Document id, used by the toolbar's brand-profile switcher to call
+   * `documents.setStyleProfile`. When omitted the switcher is hidden —
+   * the editor still works without it, just no inline profile swap.
+   */
+  readonly documentId?: string;
 }
 
 const SAVE_DEBOUNCE_MS = 600;
@@ -125,6 +143,8 @@ export function TiptapEditor({
   fields: externalFields = [],
   sidePanel,
   extraction,
+  styleProfile,
+  documentId,
 }: TiptapEditorProps) {
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -487,11 +507,39 @@ glyph_signature: "${extraction.signature || ""}"
     );
   }, [sidePanel, fields, editorRoot]);
 
+  // Compose the inline `style` map for the editor wrapper. When a
+  // styleProfile is supplied we emit its CSS variables here so the rules
+  // in `styles.css` (font-family / color / etc.) pick up the override
+  // without us having to inline every property by hand. Falls back to
+  // `undefined` so React skips writing an empty `style` attribute.
+  const profileStyle = useMemo(
+    () => (styleProfile ? profileToStyleObject(styleProfile) : undefined),
+    [styleProfile],
+  );
+
   return (
-    <div className="grid w-full gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
+    <div
+      className="grid w-full gap-8 lg:grid-cols-[minmax(0,1fr)_360px]"
+      style={profileStyle}
+    >
       <div className="min-w-0">
         <div className="sticky top-[80px] z-10 mb-6">
-          <Toolbar editor={editor} lastSaved={lastSaved} />
+          <Toolbar
+            editor={editor}
+            lastSaved={lastSaved}
+            styleProfile={
+              documentId
+                ? {
+                    docId: documentId,
+                    // Best-effort current-profile name. When the doc carries no
+                    // custom profile we display the built-in default name so the
+                    // user has visual confirmation of what's applied.
+                    currentProfileName:
+                      styleProfile?.name ?? "Glyph Modern",
+                  }
+                : undefined
+            }
+          />
         </div>
         <div
           ref={surfaceRef}

@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 const NAV = [
   { href: "/settings/api-keys", label: "API Keys" },
   { href: "/settings/document-types", label: "Document Types" },
+  { href: "/settings/style", label: "Style" },
   { href: "/settings/account", label: "Account" },
 ] as const;
 

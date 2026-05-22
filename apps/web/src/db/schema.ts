@@ -188,6 +188,17 @@ export const documents = pgTable(
     payloadIv: text("payload_iv"),
     payloadTag: text("payload_tag"),
     /**
+     * Encrypted-at-rest visual style sidecar (see @glyph/style-profile).
+     * Stores the resolved `StyleProfile` JSON for this document so re-exports
+     * (.docx / .pdf / MCP `generate`) can preserve fonts/colors/sizes/margins
+     * instead of being re-styled from hardcoded defaults. Independent of the
+     * structural ProseMirror state and the validated payload — rotating one
+     * does not disturb the others.
+     */
+    styleProfileEncrypted: text("style_profile_encrypted"),
+    styleProfileIv: text("style_profile_iv"),
+    styleProfileTag: text("style_profile_tag"),
+    /**
      * Pointer into `schema_compositions` for the resolved adaptive schema
      * this document was authored against. Null for legacy documents that
      * predate the composition resolver.
@@ -594,3 +605,41 @@ export const spanCorrections = pgTable(
 
 export type SpanCorrection = typeof spanCorrections.$inferSelect;
 export type NewSpanCorrection = typeof spanCorrections.$inferInsert;
+
+/**
+ * User-saved brand style profiles.
+ *
+ * One row per profile the user wants to reuse across documents (e.g. a
+ * "Company Brand" profile, a "Resume" profile). The payload is an
+ * encrypted `StyleProfile` JSON (see @glyph/style-profile) validated
+ * client-side via the Zod schema before encryption. The partial-unique
+ * index on `(user_id) WHERE is_default = true` enforces at most one
+ * default profile per user at the DB layer.
+ */
+export const styleProfiles = pgTable(
+  "style_profiles",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    // references auth.users(id)
+    userId: uuid("user_id").notNull(),
+    name: text("name").notNull(),
+    profileEncrypted: text("profile_encrypted").notNull(),
+    profileIv: text("profile_iv").notNull(),
+    profileTag: text("profile_tag").notNull(),
+    isDefault: boolean("is_default").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    userIdx: index("idx_style_profiles_user").on(t.userId),
+  }),
+);
+
+export type StyleProfileRow = typeof styleProfiles.$inferSelect;
+export type NewStyleProfileRow = typeof styleProfiles.$inferInsert;

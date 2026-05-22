@@ -10,12 +10,26 @@
 import { useEffect, useState } from "react";
 import type { Editor } from "@tiptap/core";
 
+import { StyleSwitcher } from "./StyleSwitcher";
+
 export interface ToolbarProps {
   editor: Editor | null;
   lastSaved?: Date | null;
+  /**
+   * Optional brand-profile switcher context. Rendered next to the
+   * Font/Color controls when both `docId` and the profile-name fields
+   * are available. The TiptapEditor wires this up from the loaded
+   * document DTO; we keep it optional here so the toolbar still works
+   * in test harnesses that don't touch the document API.
+   */
+  styleProfile?: {
+    docId: string;
+    currentProfileName: string;
+    currentProfileId?: string;
+  };
 }
 
-export function Toolbar({ editor, lastSaved }: ToolbarProps) {
+export function Toolbar({ editor, lastSaved, styleProfile }: ToolbarProps) {
   const [, force] = useState(0);
 
   useEffect(() => {
@@ -141,6 +155,16 @@ export function Toolbar({ editor, lastSaved }: ToolbarProps) {
       <Sep />
       <FontSelect editor={editor} />
       <ColorSelect editor={editor} />
+      {styleProfile && (
+        <>
+          <Sep />
+          <StyleSwitcher
+            docId={styleProfile.docId}
+            currentProfileName={styleProfile.currentProfileName}
+            currentProfileId={styleProfile.currentProfileId}
+          />
+        </>
+      )}
 
       <span className="ml-auto flex items-center gap-3 pl-2 pr-1 font-mono text-[10px] uppercase tracking-[0.18em] text-neutral-400">
         <CharCount editor={editor} />

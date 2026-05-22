@@ -269,6 +269,8 @@ export default function DocumentPage({
               onChange={handleChange}
               onExtracted={handleExtracted}
               extraction={extractionProp}
+              styleProfile={doc.styleProfile}
+              documentId={doc.id}
             />
           </FadeIn>
         </div>

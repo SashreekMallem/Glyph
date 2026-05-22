@@ -71,6 +71,18 @@ EXAMPLE FLOW:
         description:
           'Optional explicit list of schema block ids to compose (e.g. ["resume.base.v1", "resume.experience.v1", "resume.projects.v1"]). If omitted, the default required blocks for the domain are used. Use discover_schema first to see available blocks.',
       },
+      style_profile: {
+        type: 'object',
+        description:
+          "OPTIONAL. Visual style for the generated document. Pass when the user " +
+          "implicitly asks for a specific look ('blue accents', 'modern serif', " +
+          "'minimal black-and-white'). Schema: { name, fonts: { heading, body, mono }, " +
+          "colors: { text, accent, muted, background }, sizes: { h1, h2, h3, body, small }, " +
+          "spacing: { line_height, paragraph_gap }, page: { margins } }. " +
+          "All sizes in points. Colors as #RRGGBB. " +
+          "If omitted Glyph applies the document's saved profile, or 'Glyph Modern' as default.",
+        additionalProperties: true,
+      },
     },
     required: ['document_type', 'structured_data', 'output_format', 'title'],
   },
@@ -85,6 +97,10 @@ const InputSchema = z.object({
   title: z.string().min(1).max(200),
   schema_version: z.string().optional(),
   block_ids: z.array(z.string()).optional(),
+  // style_profile is intentionally NOT validated here — the API route
+  // does the full StyleProfileSchema parse. We only forward the value
+  // through so the AI can shape it freely; the server rejects junk.
+  style_profile: z.record(z.string(), z.unknown()).optional(),
 });
 
 export interface GenerateDeps {
@@ -119,6 +135,7 @@ export async function generateHandler(
         title: parsed.data.title,
         schema_version: parsed.data.schema_version,
         block_ids: parsed.data.block_ids,
+        style_profile: parsed.data.style_profile,
       }),
     });
     if (!res.ok) {

@@ -1,11 +1,35 @@
-/* Glyph editor — premium minimalist surface. */
+/* Glyph editor — premium minimalist surface.
+ *
+ * Author-specified visual styling rides on CSS custom properties set
+ * by the React wrapper from a StyleProfile. The `var(--glyph-*, default)`
+ * pattern keeps today's hardcoded look as the fallback so documents
+ * without a profile render unchanged.
+ */
 .glyph-editor {
   padding: 4rem 1.5rem;
   max-width: 48rem;
   margin: 0 auto;
-  font-family: ui-serif, Georgia, serif;
-  color: #111;
-  line-height: 1.55;
+  font-family: var(--glyph-font-body, ui-serif), Georgia, serif;
+  color: var(--glyph-color-text, #111);
+  font-size: var(--glyph-size-body, 14px);
+  line-height: var(--glyph-spacing-line-height, 1.55);
+  background: var(--glyph-color-background, transparent);
+}
+
+.glyph-editor h1 {
+  font-family: var(--glyph-font-heading, ui-serif), Georgia, serif;
+  font-size: var(--glyph-size-h1, 28px);
+}
+.glyph-editor h2 {
+  font-family: var(--glyph-font-heading, ui-serif), Georgia, serif;
+  font-size: var(--glyph-size-h2, 22px);
+}
+.glyph-editor h3 {
+  font-family: var(--glyph-font-heading, ui-serif), Georgia, serif;
+  font-size: var(--glyph-size-h3, 18px);
+}
+.glyph-editor p {
+  margin: 0 0 var(--glyph-spacing-paragraph-gap, 8px) 0;
 }
 
 .glyph-editor section {
@@ -269,7 +293,7 @@
   border: 1px solid #e2e8f0;
   border-radius: 0.75rem;
   padding: 1.25rem;
-  font-family: ui-monospace, monospace;
+  font-family: var(--glyph-font-mono, ui-monospace), monospace;
   font-size: 0.875rem;
   line-height: 1.7;
   overflow-x: auto;
