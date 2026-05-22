@@ -28,6 +28,8 @@ import { db } from "@/db";
 import { apiKeys } from "@/db/schema";
 import { verifyApiKey } from "@glyph/crypto";
 import { getExtractLimiter } from "@/lib/extract-ratelimit";
+import { detectGaps } from "@/lib/schemas/gap-detector";
+import { loadSchema } from "@/lib/schemas/loader";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,8 +38,11 @@ const API_KEY_PREFIX_LEN = 16;
 
 const BodySchema = z.object({
   text: z.string().min(1),
-  doc_type: z.enum(["resume", "contract", "invoice"]),
-  schema_hint: z.record(z.string(), z.unknown()).optional(),
+  // Any doc_type key — schemas are looked up at runtime from document_types
+  // / schema_blocks, and Gemini synthesizes one if nothing exists.
+  doc_type: z.string().min(1).max(120),
+  // Optional explicit override — skips the DB lookup if provided.
+  json_schema: z.record(z.string(), z.unknown()).optional(),
 });
 
 interface GlinerSpan {
@@ -130,6 +135,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
+    // 3.5. Resolve the JSON Schema (loader handles document_types →
+    //      schema_blocks → Gemini synthesis fallback).
+    let jsonSchema: Record<string, unknown> | null = body.json_schema ?? null;
+    if (jsonSchema === null) {
+      const loaded = await loadSchema(db as never, {
+        typeKey: body.doc_type,
+        userId: keyRecord.userId,
+        sampleText: body.text,
+      });
+      if (!loaded) {
+        return err(
+          404,
+          "schema_not_found",
+          `No schema for doc_type "${body.doc_type}" and Gemini could not synthesize one from the provided text.`,
+        );
+      }
+      jsonSchema = loaded.jsonSchema;
+    }
+
     let upstream: Response;
     try {
       upstream = await fetch(`${glinerUrl}/v1/extract`, {
@@ -137,8 +161,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           text: body.text,
-          doc_type: body.doc_type,
-          ...(body.schema_hint ? { schema_hint: body.schema_hint } : {}),
+          json_schema: jsonSchema,
         }),
         // Direct-API consumers may pass longer documents than the SSE
         // fast-path — give the upstream a generous 30s before we bail.
@@ -170,6 +193,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } catch {
       return err(502, "upstream_error", "GLiNER2 returned malformed JSON.");
     }
+
+    // Fire-and-forget gap detection: propose schema additions for fields
+    // the model saw in the text but the schema doesn't cover. Best-effort —
+    // a failure here never affects the response.
+    void detectGaps(db as never, {
+      typeKey: body.doc_type,
+      text: body.text,
+      spans: payload.spans,
+      jsonSchema: jsonSchema,
+      userId: keyRecord.userId,
+    }).catch(() => {});
 
     // Verbatim pass-through; the upstream owns the response contract.
     return NextResponse.json(payload, { status: 200 });

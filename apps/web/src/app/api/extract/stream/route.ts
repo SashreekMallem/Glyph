@@ -49,6 +49,8 @@ import {
   resolveSchema,
   SchemaNotFoundError,
 } from "@/lib/extract/resolve-schema";
+import { loadSchema } from "@/lib/schemas/loader";
+import { detectGaps } from "@/lib/schemas/gap-detector";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -149,13 +151,13 @@ function spansToPatches(
 async function callGliner(args: {
   readonly url: string;
   readonly text: string;
-  readonly docType: string;
+  readonly jsonSchema: Record<string, unknown>;
 }): Promise<GlinerResponse | null> {
   try {
     const r = await fetch(`${args.url}/v1/extract`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: args.text, doc_type: args.docType }),
+      body: JSON.stringify({ text: args.text, json_schema: args.jsonSchema }),
       signal: AbortSignal.timeout(GLINER_TIMEOUT_MS),
     });
     if (!r.ok) return null;
@@ -605,15 +607,39 @@ export async function POST(req: NextRequest): Promise<Response> {
       // -------------------------------------------------------------------
       const glinerUrl = process.env.GLINER_SERVICE_URL;
       let glinerResult: GlinerResponse | null = null;
+      let glinerJsonSchema: Record<string, unknown> | null = null;
       let skipGemini = false;
       if (glinerUrl && body.fullText) {
+        // Resolve the JSON Schema for this doc_type. Falls through the
+        // document_types → schema_blocks → Gemini-synthesis chain. The
+        // synthesis branch writes back to the DB so the NEXT user with
+        // the same doc_type inherits the schema for free.
+        const loaded = await loadSchema(db as never, {
+          typeKey: body.schemaType,
+          userId,
+          sampleText: body.fullText,
+        });
+        if (loaded) {
+          glinerJsonSchema = loaded.jsonSchema;
+          logExtractEvent({
+            event: "schema.loaded",
+            requestId,
+            userId,
+            docId: body.docId,
+            sessionId,
+            schemaVersion: loaded.schemaVersion,
+            extra: { source: loaded.source },
+          });
+        }
         const glinerStart = Date.now();
         try {
-          glinerResult = await callGliner({
-            url: glinerUrl,
-            text: body.fullText,
-            docType: body.schemaType,
-          });
+          if (glinerJsonSchema !== null) {
+            glinerResult = await callGliner({
+              url: glinerUrl,
+              text: body.fullText,
+              jsonSchema: glinerJsonSchema,
+            });
+          }
         } catch (err) {
           log({
             requestId,
@@ -704,6 +730,38 @@ export async function POST(req: NextRequest): Promise<Response> {
             safeEnqueue(
               sseEvent("patch", { patches, seq: patchSeq++ }),
             );
+          }
+          // Fire-and-forget gap detection: look for fields GLiNER2 missed
+          // and propose them as new schema_blocks. Runs out-of-band so it
+          // never delays the SSE response. Errors are swallowed; the user
+          // only ever sees the extraction result.
+          if (glinerJsonSchema !== null && body.fullText) {
+            void detectGaps(db as never, {
+              typeKey: body.schemaType,
+              text: body.fullText,
+              spans: glinerResult.spans,
+              jsonSchema: glinerJsonSchema,
+              userId,
+            })
+              .then((res) => {
+                if (res.autoAdded.length + res.queued.length > 0) {
+                  logExtractEvent({
+                    event: "schema.gaps_detected",
+                    requestId,
+                    userId,
+                    docId: body.docId,
+                    sessionId,
+                    extra: {
+                      autoAdded: res.autoAdded.length,
+                      queued: res.queued.length,
+                      proposalsTotal: res.proposals.length,
+                    },
+                  });
+                }
+              })
+              .catch(() => {
+                // Best-effort — the extraction itself already succeeded.
+              });
           }
         } else {
           // Gemini fallback (the original path). If GLiNER2 produced a

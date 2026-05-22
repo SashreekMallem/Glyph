@@ -50,6 +50,9 @@ importers:
       '@glyph/schema-library':
         specifier: workspace:*
         version: link:../../packages/schema-library
+      '@google/genai':
+        specifier: ^1.51.0
+        version: 1.51.0(@modelcontextprotocol/sdk@1.29.0(zod@3.25.76))
       '@radix-ui/react-dialog':
         specifier: ^1.1.15
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.14))(@types/react@19.2.14)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
