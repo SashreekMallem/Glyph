@@ -189,6 +189,10 @@ function extractInvoice(text: string): HeuristicResult {
 
 /**
  * Run the heuristic extractor for the given document type.
+ *
+ * Only the three legacy keys ("contract"/"resume"/"invoice") have
+ * dedicated regex extractors. Any other key returns an empty extraction
+ * with `valid: false` so the caller falls back to the LLM-grade path.
  */
 export function extractHeuristic(
   type: DocumentType,
@@ -201,5 +205,11 @@ export function extractHeuristic(
       return extractResume(text);
     case 'invoice':
       return extractInvoice(text);
+    default:
+      return {
+        extracted: { document_type: type, schema_version: '1.0' },
+        missingFields: [],
+        valid: false,
+      };
   }
 }

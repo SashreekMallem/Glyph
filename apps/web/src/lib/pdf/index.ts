@@ -1,8 +1,6 @@
 export {
   generatePdf,
-  renderContract,
-  renderResume,
-  renderInvoice,
+  renderGeneric,
   type GeneratePdfOptions,
 } from "./generate";
 export { injectGlyphXmp } from "./inject";

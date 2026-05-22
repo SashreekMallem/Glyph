@@ -18,15 +18,15 @@ import {
   rgb,
 } from "pdf-lib";
 
-import type {
-  Contract,
-  Invoice,
-  Resume,
-  GlyphDocument,
-} from "@glyph/schema-library";
-
 import { injectGlyphXmp } from "./inject";
 import type { GlyphXmpMetadata } from "./xmp";
+
+// Document payloads are arbitrary, schema-driven JSON objects — the
+// hardcoded `Contract`/`Resume`/`Invoice` Zod types are gone and every
+// schema now lives in the `document_types` DB table. The generic
+// renderer walks the validated payload recursively and produces a
+// reasonable layout for any shape.
+type GlyphDocument = Record<string, unknown>;
 
 // ---------------------------------------------------------------------------
 // Layout constants — premium minimalist.
@@ -232,247 +232,12 @@ function finalize(cursor: LayoutCursor): PDFDocument {
   return cursor.doc;
 }
 
-function formatDate(iso: string): string {
-  // Dates come in as ISO-8601 full-date. Render as "Jan 5, 2025" without
-  // any locale-sensitive surprises.
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
-  if (!m) return iso;
-  const year = Number(m[1]);
-  const month = Number(m[2]);
-  const day = Number(m[3]);
-  const MONTHS = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-  ];
-  const label = MONTHS[month - 1] ?? String(month);
-  return `${label} ${day}, ${year}`;
-}
-
-function formatMoney(amount: number, currency: string): string {
-  // Currency is 3-letter ISO; no fancy locale formatting.
-  const whole = Math.trunc(amount);
-  const cents = Math.round((amount - whole) * 100);
-  const centsStr = cents.toString().padStart(2, "0");
-  return `${currency.toUpperCase()} ${whole.toLocaleString("en-US")}.${centsStr}`;
-}
-
 // ---------------------------------------------------------------------------
-// Contract renderer
-// ---------------------------------------------------------------------------
-
-export async function renderContract(doc: Contract): Promise<PDFDocument> {
-  const footer = `Generated with Glyph · ${doc.document_type.toUpperCase()}`;
-  const cursor = await newDocument(footer);
-
-  drawTitle(cursor, "Contract Agreement");
-  drawMeta(
-    cursor,
-    `Effective ${formatDate(doc.effective_date)}` +
-      (doc.expiry_date ? ` — Expires ${formatDate(doc.expiry_date)}` : ""),
-  );
-
-  drawHeading(cursor, "Parties");
-  for (const party of doc.parties) {
-    const roleLabel = party.role.charAt(0).toUpperCase() + party.role.slice(1);
-    drawText(cursor, `${party.name}`, { font: cursor.fonts.bold });
-    drawMeta(
-      cursor,
-      [roleLabel, party.address, party.email].filter(Boolean).join(" · "),
-    );
-  }
-
-  if (doc.payment_terms) {
-    drawHeading(cursor, "Payment Terms");
-    const pt = doc.payment_terms;
-    const lines: string[] = [];
-    if (pt.amount !== undefined && pt.currency !== undefined) {
-      lines.push(`Amount: ${formatMoney(pt.amount, pt.currency)}`);
-    } else if (pt.amount !== undefined) {
-      lines.push(`Amount: ${pt.amount}`);
-    }
-    if (pt.schedule !== undefined) lines.push(`Schedule: ${pt.schedule}`);
-    if (pt.due_days !== undefined) lines.push(`Due in: ${pt.due_days} days`);
-    for (const line of lines) drawText(cursor, line);
-  }
-
-  if (doc.obligations.length > 0) {
-    drawHeading(cursor, "Obligations");
-    for (const ob of doc.obligations) {
-      drawText(cursor, `${ob.party}`, { font: cursor.fonts.bold });
-      drawText(cursor, ob.description, { indent: 12 });
-      if (ob.deadline !== undefined) {
-        drawMeta(cursor, `Deadline: ${formatDate(ob.deadline)}`);
-      }
-    }
-  }
-
-  drawHeading(cursor, "Governing Law");
-  drawText(cursor, doc.governing_law);
-
-  if (doc.termination_notice_days !== undefined) {
-    drawHeading(cursor, "Termination");
-    drawText(
-      cursor,
-      `Either party may terminate with ${doc.termination_notice_days} days written notice.`,
-    );
-  }
-
-  drawHeading(cursor, "Confidentiality");
-  drawText(
-    cursor,
-    doc.confidentiality
-      ? "This agreement is confidential between the parties."
-      : "No confidentiality clause applies.",
-  );
-
-  return finalize(cursor);
-}
-
-// ---------------------------------------------------------------------------
-// Resume renderer
-// ---------------------------------------------------------------------------
-
-export async function renderResume(doc: Resume): Promise<PDFDocument> {
-  const footer = `Generated with Glyph · RESUME`;
-  const cursor = await newDocument(footer);
-
-  drawTitle(cursor, doc.personal.full_name);
-  const personalBits: string[] = [doc.personal.email];
-  if (doc.personal.phone) personalBits.push(doc.personal.phone);
-  if (doc.personal.location) personalBits.push(doc.personal.location);
-  if (doc.personal.website) personalBits.push(doc.personal.website);
-  if (doc.personal.linkedin) personalBits.push(doc.personal.linkedin);
-  drawMeta(cursor, personalBits.join(" · "));
-
-  if (doc.summary) {
-    drawHeading(cursor, "Summary");
-    drawText(cursor, doc.summary);
-  }
-
-  if (doc.experience.length > 0) {
-    drawHeading(cursor, "Experience");
-    for (const exp of doc.experience) {
-      drawText(cursor, `${exp.title} — ${exp.company}`, {
-        font: cursor.fonts.bold,
-      });
-      const range =
-        formatDate(exp.start_date) +
-        " — " +
-        (exp.end_date ? formatDate(exp.end_date) : "Present");
-      drawMeta(cursor, [range, exp.location].filter(Boolean).join(" · "));
-      drawText(cursor, exp.description);
-      if (exp.achievements && exp.achievements.length > 0) {
-        for (const a of exp.achievements) {
-          drawText(cursor, `• ${a}`, { indent: 12 });
-        }
-      }
-    }
-  }
-
-  if (doc.education.length > 0) {
-    drawHeading(cursor, "Education");
-    for (const ed of doc.education) {
-      const title =
-        ed.degree + (ed.field !== undefined ? ` in ${ed.field}` : "");
-      drawText(cursor, `${title} — ${ed.institution}`, {
-        font: cursor.fonts.bold,
-      });
-      const bits: string[] = [];
-      if (ed.graduation_year !== undefined) bits.push(String(ed.graduation_year));
-      if (ed.gpa !== undefined) bits.push(`GPA ${ed.gpa.toFixed(2)}`);
-      if (bits.length > 0) drawMeta(cursor, bits.join(" · "));
-    }
-  }
-
-  if (doc.skills && doc.skills.length > 0) {
-    drawHeading(cursor, "Skills");
-    for (const group of doc.skills) {
-      drawText(cursor, `${group.category}: ${group.items.join(", ")}`);
-    }
-  }
-
-  if (doc.certifications && doc.certifications.length > 0) {
-    drawHeading(cursor, "Certifications");
-    for (const cert of doc.certifications) {
-      drawText(cursor, `${cert.name} — ${cert.issuer}`, {
-        font: cursor.fonts.bold,
-      });
-      const bits: string[] = [];
-      if (cert.issued_date) bits.push(`Issued ${formatDate(cert.issued_date)}`);
-      if (cert.expires_date)
-        bits.push(`Expires ${formatDate(cert.expires_date)}`);
-      if (bits.length > 0) drawMeta(cursor, bits.join(" · "));
-    }
-  }
-
-  return finalize(cursor);
-}
-
-// ---------------------------------------------------------------------------
-// Invoice renderer
-// ---------------------------------------------------------------------------
-
-export async function renderInvoice(doc: Invoice): Promise<PDFDocument> {
-  const footer = `Generated with Glyph · Invoice ${doc.invoice_number}`;
-  const cursor = await newDocument(footer);
-
-  drawTitle(cursor, `Invoice ${doc.invoice_number}`);
-  drawMeta(
-    cursor,
-    `Issued ${formatDate(doc.issue_date)} · Due ${formatDate(doc.due_date)}`,
-  );
-
-  drawHeading(cursor, "From");
-  drawText(cursor, doc.vendor.name, { font: cursor.fonts.bold });
-  for (const line of [doc.vendor.address, doc.vendor.email, doc.vendor.phone, doc.vendor.tax_id]) {
-    if (line !== undefined) drawMeta(cursor, line);
-  }
-
-  drawHeading(cursor, "Bill To");
-  drawText(cursor, doc.bill_to.name, { font: cursor.fonts.bold });
-  for (const line of [
-    doc.bill_to.address,
-    doc.bill_to.email,
-    doc.bill_to.phone,
-    doc.bill_to.tax_id,
-  ]) {
-    if (line !== undefined) drawMeta(cursor, line);
-  }
-
-  drawHeading(cursor, "Line Items");
-  for (const item of doc.line_items) {
-    drawText(cursor, item.description, { font: cursor.fonts.bold });
-    drawMeta(
-      cursor,
-      `${item.quantity} × ${formatMoney(item.unit_price, doc.currency)}  =  ${formatMoney(item.total, doc.currency)}`,
-    );
-  }
-
-  drawHeading(cursor, "Totals");
-  drawText(cursor, `Subtotal: ${formatMoney(doc.subtotal, doc.currency)}`);
-  if (doc.tax_amount !== undefined) {
-    const ratePct =
-      doc.tax_rate !== undefined ? ` (${(doc.tax_rate * 100).toFixed(2)}%)` : "";
-    drawText(cursor, `Tax${ratePct}: ${formatMoney(doc.tax_amount, doc.currency)}`);
-  }
-  drawText(cursor, `Total: ${formatMoney(doc.total, doc.currency)}`, {
-    font: cursor.fonts.bold,
-  });
-
-  if (doc.payment_instructions) {
-    drawHeading(cursor, "Payment Instructions");
-    drawText(cursor, doc.payment_instructions);
-  }
-  if (doc.notes) {
-    drawHeading(cursor, "Notes");
-    drawText(cursor, doc.notes);
-  }
-
-  return finalize(cursor);
-}
-
-// ---------------------------------------------------------------------------
-// Generic renderer for custom/agentic schemas
+// Generic renderer for schema-driven documents
+//
+// The hardcoded contract/resume/invoice renderers have been removed —
+// schemas live in the DB now, so every document type is rendered by the
+// recursive `renderGeneric` walker below.
 // ---------------------------------------------------------------------------
 
 async function renderGenericNode(
@@ -529,20 +294,42 @@ async function renderGenericNode(
   }
 }
 
+function readString(v: unknown): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function readNestedString(
+  obj: GlyphDocument,
+  key: string,
+  child: string,
+): string | undefined {
+  const outer = obj[key];
+  if (outer === null || typeof outer !== "object" || Array.isArray(outer)) {
+    return undefined;
+  }
+  return readString((outer as Record<string, unknown>)[child]);
+}
+
 export async function renderGeneric(doc: GlyphDocument): Promise<PDFDocument> {
-  const typeLabel = (doc.document_type ?? "custom").toUpperCase();
+  const typeLabel = (readString(doc.document_type) ?? "custom").toUpperCase();
   const footer = `Generated with Glyph · ${typeLabel}`;
   const cursor = await newDocument(footer);
 
   // 1. Title / Header
-  const title = (doc as any).personal_info?.name || (doc as any).name || "Document Summary";
+  const title =
+    readNestedString(doc, "personal_info", "name") ??
+    readString(doc.name) ??
+    "Document Summary";
   drawTitle(cursor, title);
-  
+
   const metaBits: string[] = [];
-  if ((doc as any).personal_info?.email) metaBits.push((doc as any).personal_info.email);
-  if ((doc as any).personal_info?.phone) metaBits.push((doc as any).personal_info.phone);
-  if ((doc as any).personal_info?.location) metaBits.push((doc as any).personal_info.location);
-  
+  const email = readNestedString(doc, "personal_info", "email");
+  if (email) metaBits.push(email);
+  const phone = readNestedString(doc, "personal_info", "phone");
+  if (phone) metaBits.push(phone);
+  const location = readNestedString(doc, "personal_info", "location");
+  if (location) metaBits.push(location);
+
   if (metaBits.length > 0) {
     drawMeta(cursor, metaBits.join(" · "));
   }
@@ -561,7 +348,7 @@ export async function renderGeneric(doc: GlyphDocument): Promise<PDFDocument> {
 
   for (const [k, v] of entries) {
     if (v === null || v === undefined) continue;
-    
+
     // Summary gets special treatment as a lead-in
     if (k === "summary" && typeof v === "string") {
       drawHeading(cursor, "Summary");
@@ -587,26 +374,16 @@ export interface GeneratePdfOptions {
   readonly xmp: GlyphXmpMetadata;
 }
 
-/** Render the given document and inject the supplied XMP metadata. */
+/** Render the given document and inject the supplied XMP metadata.
+ *
+ * All schemas now resolve via the DB-backed registry, so the renderer
+ * walks the validated payload generically — there are no per-type
+ * compile-time layouts anymore. */
 export async function generatePdf(
   options: GeneratePdfOptions,
 ): Promise<Uint8Array> {
   const { document, xmp } = options;
-  let pdfDoc: PDFDocument;
-  switch (document.document_type) {
-    case "contract":
-      pdfDoc = await renderContract(document);
-      break;
-    case "resume":
-      pdfDoc = await renderResume(document);
-      break;
-    case "invoice":
-      pdfDoc = await renderInvoice(document);
-      break;
-    default:
-      pdfDoc = await renderGeneric(document);
-      break;
-  }
+  const pdfDoc = await renderGeneric(document);
   injectGlyphXmp(pdfDoc, xmp);
   return pdfDoc.save();
 }

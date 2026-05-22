@@ -23,13 +23,15 @@ import {
   verifySignature,
 } from "@glyph/crypto";
 import {
-  type GlyphDocument,
-} from "@glyph/schema-library";
-import {
   getValidatorForType,
-  isBuiltInType,
   resolveSchema,
 } from "../documentRegistry";
+
+// `GlyphDocument` used to be a Zod-derived discriminated union exported
+// from `@glyph/schema-library`. With schemas now in the DB, document
+// payloads are arbitrary JSON objects validated against the resolved
+// runtime schema.
+type GlyphDocument = Record<string, unknown>;
 import { loadComposition } from "../composition";
 import { generatePdf } from "@/lib/pdf";
 import {
@@ -37,13 +39,16 @@ import {
   getSupabaseServiceClient,
 } from "@/lib/supabase/storage";
 
-const documentTypeEnum = z.enum(["contract", "resume", "invoice", "custom"]);
+// Document type keys are now arbitrary strings (sourced from the
+// `document_types` table). Output validators just check it's a non-empty
+// string.
+const documentTypeOutputSchema = z.string().min(1);
 
 const DocumentDTOSchema = z.object({
   id: z.string().uuid(),
   userId: z.string().uuid(),
   title: z.string(),
-  documentType: documentTypeEnum,
+  documentType: documentTypeOutputSchema,
   schemaVersion: z.string(),
   prosemirrorState: z.unknown(),
   isFinalized: z.boolean(),
@@ -168,16 +173,16 @@ export const documentsRouter = router({
         throw new TRPCError({ code: "FORBIDDEN" });
       }
 
-      const enumValue = isBuiltInType(input.typeKey)
-        ? input.typeKey
-        : ("custom" as const);
-
+      // `documents.documentType` is the coarse renderer/category column;
+      // `documents.documentTypeKey` is the precise key into
+      // `document_types`. With every schema now in the DB, the coarse
+      // column is always the literal "custom".
       const [row] = await db
         .insert(documents)
         .values({
           userId: ctx.user.id,
           title: input.title,
-          documentType: enumValue,
+          documentType: "custom",
           documentTypeKey: input.typeKey,
           templateId: input.templateId ?? null,
           schemaVersion: typeRow.schemaVersion,

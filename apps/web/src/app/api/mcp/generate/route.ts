@@ -24,7 +24,6 @@ import { deflateRawSync } from "node:zlib";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { encryptPayload, signPayload } from "@glyph/crypto";
-import type { GlyphDocument } from "@glyph/schema-library";
 
 import { authenticateApiKey } from "@/lib/api-key-auth";
 import { attachMeta, buildMeta } from "@/lib/payload-meta";
@@ -407,7 +406,7 @@ export async function POST(req: NextRequest) {
       { status: 422 },
     );
   }
-  const document = parsed.data as GlyphDocument;
+  const document = parsed.data as Record<string, unknown>;
 
   const canonical = canonicalize(document);
   if (canonical === null || typeof canonical !== "object" || Array.isArray(canonical)) {

@@ -12,15 +12,8 @@
  */
 
 import { useMemo } from "react";
-import { isBuiltInDocumentType } from "@glyph/schema-library";
 import { trpc } from "@/lib/trpc";
-import {
-  descriptorsFor,
-  type DocType,
-} from "@/components/editor/descriptors";
 import type { FieldDescriptor } from "@/lib/editor/types";
-
-const isBuiltIn = (k: string): k is DocType => isBuiltInDocumentType(k);
 
 export interface UseDocumentDescriptorsResult {
   readonly descriptors: FieldDescriptor[];
@@ -31,10 +24,11 @@ export interface UseDocumentDescriptorsResult {
 export function useDocumentDescriptors(
   documentTypeKey: string,
 ): UseDocumentDescriptorsResult {
-  const fallback = useMemo<FieldDescriptor[]>(
-    () => (isBuiltIn(documentTypeKey) ? descriptorsFor(documentTypeKey) : []),
-    [documentTypeKey],
-  );
+  // Document type keys are now arbitrary strings — there are no compile-time
+  // "built-in" descriptors to fall back to. If the DB query misses, we
+  // return an empty descriptor list and let the editor render generically.
+  void documentTypeKey;
+  const fallback = useMemo<FieldDescriptor[]>(() => [], []);
 
   const query = trpc.documentTypes.getDefaultForKey.useQuery(
     { key: documentTypeKey },

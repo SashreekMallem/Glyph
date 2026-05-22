@@ -10,7 +10,37 @@ import {
   allocateKey,
   type EaseEncoded,
 } from "../src/ease";
-import { ResumeSchema } from "@glyph/schema-library";
+
+// Inline minimal resume schema for the property test — the schema package
+// no longer ships a hardcoded ResumeSchema (schemas live in the DB).
+const ResumeSchema = z.object({
+  document_type: z.literal("resume"),
+  schema_version: z.string(),
+  personal: z.object({
+    full_name: z.string().min(1),
+    email: z.string().email(),
+  }),
+  experience: z.array(
+    z.object({
+      company: z.string().min(1),
+      title: z.string().min(1),
+      start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      description: z.string().min(1),
+    }),
+  ),
+  education: z.array(
+    z.object({
+      institution: z.string().min(1),
+      degree: z.string().min(1),
+    }),
+  ),
+  skills: z.array(
+    z.object({
+      category: z.string().min(1),
+      items: z.array(z.string().min(1)).min(1),
+    }),
+  ),
+});
 
 // ---------------------------------------------------------------------------
 // 1. Encode flat array

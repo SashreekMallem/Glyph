@@ -1,7 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { jsonSchemaToZod } from '../src/runtime.js';
-import { ContractSchema } from '../src/contract.js';
-import { toJsonSchema } from '../src/json-schema.js';
 
 describe('jsonSchemaToZod', () => {
   it('builds a string validator with length + format', () => {
@@ -81,27 +79,6 @@ describe('jsonSchemaToZod', () => {
     expect(z.safeParse('x').success).toBe(true);
     expect(z.safeParse(null).success).toBe(true);
     expect(z.safeParse(1).success).toBe(false);
-  });
-
-  it('round-trips the real ContractSchema through JSON Schema', () => {
-    const json = toJsonSchema(ContractSchema);
-    const rebuilt = jsonSchemaToZod(json);
-    const valid = {
-      document_type: 'contract',
-      schema_version: '1.0',
-      parties: [
-        { name: 'A', role: 'client' },
-        { name: 'B', role: 'vendor' },
-      ],
-      effective_date: '2025-01-01',
-      obligations: [],
-      governing_law: 'California',
-      confidentiality: false,
-    };
-    expect(rebuilt.safeParse(valid).success).toBe(true);
-    expect(
-      rebuilt.safeParse({ ...valid, parties: [valid.parties[0]] }).success,
-    ).toBe(false);
   });
 
   it('returns z.unknown() for empty / unsupported schema', () => {

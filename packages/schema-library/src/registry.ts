@@ -1,42 +1,23 @@
-import { z, type ZodType } from 'zod';
+// No built-in document types — schemas live in the document_types table.
+// This module re-exports the runtime JSON Schema → Zod converter for
+// callers that need to compile a fetched JSON Schema on the fly.
 
-import { ContractSchema } from './contract.js';
-import { InvoiceSchema } from './invoice.js';
-import { ResumeSchema } from './resume.js';
+import type { ZodTypeAny } from 'zod';
 
-export const DocumentSchema = z.discriminatedUnion('document_type', [
-  ContractSchema,
-  ResumeSchema,
-  InvoiceSchema,
-]);
+/** Doc type keys are arbitrary strings — anything in document_types.key works. */
+export type DocumentType = string;
 
-export type GlyphDocument = z.infer<typeof DocumentSchema>;
-
-export type DocumentType = 'contract' | 'resume' | 'invoice';
-
-const BUILT_IN_KEYS: ReadonlySet<string> = new Set(['contract', 'resume', 'invoice']);
-
-/** Returns true if the given string is one of the three built-in document types. */
-export function isBuiltInDocumentType(type: string): type is DocumentType {
-  return BUILT_IN_KEYS.has(type);
+/** Always returns false — there are no built-ins anymore. Kept as a function
+ *  for compatibility with the small number of call sites that still ask. */
+export function isBuiltInDocumentType(_type: string): boolean {
+  return false;
 }
 
-const REGISTRY = {
-  contract: ContractSchema,
-  resume: ResumeSchema,
-  invoice: InvoiceSchema,
-} as const satisfies Record<DocumentType, ZodType>;
-
-/**
- * Return the Zod schema for a given document type.
- *
- * Throws if called with an unregistered type. Callers that accept user
- * input should validate the type before calling.
- */
-export function getSchema(type: DocumentType): ZodType {
-  const schema = REGISTRY[type];
-  if (schema === undefined) {
-    throw new Error(`Unknown document type: ${String(type)}`);
-  }
-  return schema;
+/** Schemas are resolved at runtime from the DB. This stub exists only to
+ *  satisfy legacy MCP code that hasn't been migrated yet; it throws. */
+export function getSchema(_type: string): ZodTypeAny {
+  throw new Error(
+    'getSchema(typeKey) is no longer supported. Use resolveSchema(db, { typeKey }) ' +
+      'from apps/web/src/lib/extract/resolve-schema.ts instead.',
+  );
 }

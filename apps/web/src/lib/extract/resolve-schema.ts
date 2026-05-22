@@ -1,36 +1,27 @@
 /**
  * Dynamic schema resolver.
  *
- * The extraction pipeline accepts either a built-in document type
- * (`contract` | `resume` | `invoice`) shipped in `@glyph/schema-library`,
- * or a user-defined type stored as JSON Schema in the `document_types`
- * table. This module unifies both paths behind a single `resolveSchema`
- * call that returns the live Zod validator, the JSON Schema
- * representation, a stable `schemaVersion`, and a `source` discriminator.
+ * The extraction pipeline accepts any document type key registered in the
+ * `document_types` table (system types like `contract`/`resume`/`invoice`
+ * and user-defined custom types alike). This module unifies that lookup
+ * behind a single `resolveSchema` call that returns the live Zod
+ * validator, the JSON Schema representation, and a stable `schemaVersion`.
  *
  * Caching: a small in-memory FIFO cache (`max = 256`) keyed by
  * `${typeKey}:${schemaVersion}` skips both the DB roundtrip and the
  * `jsonSchemaToZod` compile on hot paths. The cache key is recorded after
  * resolution so callers that don't yet know `schemaVersion` (the very
- * first lookup) still hit on subsequent calls. Built-ins are also cached
- * to avoid re-running `toJsonSchema` per request.
+ * first lookup) still hit on subsequent calls.
  *
- * Tenant isolation: built-in keys skip the user filter (they're shared
- * across all tenants). Custom keys ALWAYS filter by `userId IS NULL OR
- * userId = ?`, so tenant A cannot resolve tenant B's private types.
+ * Tenant isolation: every lookup filters by `userId IS NULL OR userId = ?`,
+ * so tenant A cannot resolve tenant B's private types.
  */
 import { createHash } from "node:crypto";
 
 import { and, eq, isNull, or } from "drizzle-orm";
 import type { ZodTypeAny } from "zod";
 
-import {
-  getSchema,
-  isBuiltInDocumentType,
-  jsonSchemaToZod,
-  toJsonSchema,
-  type DocumentType,
-} from "@glyph/schema-library";
+import { jsonSchemaToZod } from "@glyph/schema-library";
 
 import { documentTypes } from "@/db/schema";
 
@@ -38,7 +29,7 @@ import { documentTypes } from "@/db/schema";
 // Public surface
 // ---------------------------------------------------------------------------
 
-export type SchemaSource = "builtin" | "custom";
+export type SchemaSource = "custom";
 
 export interface ResolvedSchema {
   readonly zodSchema: ZodTypeAny;
@@ -65,9 +56,6 @@ export class SchemaNotFoundError extends Error {
     this.userId = userId;
   }
 }
-
-const isBuiltIn = (typeKey: string): typeKey is DocumentType =>
-  isBuiltInDocumentType(typeKey);
 
 // ---------------------------------------------------------------------------
 // FIFO cache
@@ -158,35 +146,16 @@ export async function resolveSchema(
   const { typeKey, userId } = args;
 
   // Initial lookup key — used to short-circuit before we know the
-  // resolved version. We include userId in the custom path so that
-  // tenant A's "foo" cannot return tenant B's cached "foo".
-  const lookupKey = isBuiltIn(typeKey)
-    ? `lookup:builtin:${typeKey}`
-    : `lookup:custom:${userId ?? "anon"}:${typeKey}`;
+  // resolved version. We include userId so that tenant A's "foo" cannot
+  // return tenant B's cached "foo".
+  const lookupKey = `lookup:custom:${userId ?? "anon"}:${typeKey}`;
 
   const lookupHit = cacheGet(lookupKey);
   if (lookupHit) return lookupHit;
 
-  if (isBuiltIn(typeKey)) {
-    const zodSchema = getSchema(typeKey);
-    const schemaJson = toJsonSchema(zodSchema) as unknown as Record<
-      string,
-      unknown
-    >;
-    const resolved: ResolvedSchema = {
-      zodSchema,
-      schemaJson,
-      schemaVersion: `builtin-v1-${typeKey}`,
-      source: "builtin",
-    };
-    cachePut(lookupKey, resolved);
-    cachePut(`${typeKey}:${resolved.schemaVersion}`, resolved);
-    return resolved;
-  }
-
-  // Custom path: query DB with tenant isolation.
-  // userId IS NULL covers shared/system custom types; userId = ? covers
-  // the caller's own private types.
+  // Query DB with tenant isolation.
+  // userId IS NULL covers shared/system types; userId = ? covers the
+  // caller's own private types.
   const condition = userId
     ? and(
         eq(documentTypes.key, typeKey),

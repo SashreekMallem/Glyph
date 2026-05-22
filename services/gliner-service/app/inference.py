@@ -1,10 +1,32 @@
-"""Singleton GLiNER2 model loader + inference.
+"""Singleton GLiNER2 model loader + schema-agnostic inference.
 
 Both `serve.py` (local uvicorn) and `modal_app.py` (Modal) import `run_extract`
-from this module — keeping a single source of truth for inference logic.
+from this module — single source of truth for inference logic.
 
-The model is lazily loaded on first call so unit tests can monkey-patch
-`_MODEL` to a fake before the heavyweight import ever runs.
+This service is intentionally dumb about doc types. Every request carries
+its own JSON Schema (looked up or synthesized by Next.js). We compile that
+schema into a GLiNER2 fluent schema at request time and run extraction.
+
+Output shape (GLiNER2 1.3.x) when called with `include_confidence=True,
+include_spans=True`:
+
+    {
+      "<structure_name>": [
+        {
+          "<field_name>": [
+            {"text": str, "confidence": float, "start": int, "end": int},
+            ...
+          ],
+          ...
+        },
+        ...
+      ],
+      ...
+    }
+
+We map structure names back to their JSON Schema dot-paths via the
+`structure_paths` map produced by `compile_schema`, so the assembled
+`structured` payload matches the original JSON Schema's nested shape.
 """
 
 from __future__ import annotations
@@ -12,33 +34,21 @@ from __future__ import annotations
 import logging
 import time
 from threading import Lock
-from typing import Any, Protocol
+from typing import Any
 
-from .glyph_schemas import get_schema, is_array_section
+from .inference_types import GLiNER2Protocol
+from .json_schema_walker import CompiledSchema, compile_schema
 from .schemas import ExtractResponse, Span
 
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "fastino/gliner2-large-v1"
 
-
-class _GLiNER2Protocol(Protocol):
-    """Structural type for the subset of the GLiNER2 API we use.
-
-    Real model exposes `.extract(text, schema=...)` returning a list of
-    `{section, field, value, start, end, confidence}` dicts (or close to it).
-    The exact field names are normalized in `_normalize_predictions`.
-    """
-
-    def extract(self, text: str, schema: str) -> list[dict[str, Any]]:
-        ...
-
-
-_MODEL: _GLiNER2Protocol | None = None
+_MODEL: GLiNER2Protocol | None = None
 _MODEL_LOCK = Lock()
 
 
-def get_model() -> _GLiNER2Protocol:
+def get_model() -> GLiNER2Protocol:
     """Lazily load the GLiNER2 model exactly once, thread-safe."""
     global _MODEL
     if _MODEL is not None:
@@ -47,7 +57,6 @@ def get_model() -> _GLiNER2Protocol:
         if _MODEL is not None:
             return _MODEL
         logger.info("Loading GLiNER2 model %s (first call, may take a minute)...", MODEL_NAME)
-        # Local import: keeps unit tests importable without the heavyweight dep.
         from gliner2 import GLiNER2  # type: ignore[import-not-found]
 
         _MODEL = GLiNER2.from_pretrained(MODEL_NAME)
@@ -59,114 +68,165 @@ def is_model_loaded() -> bool:
     return _MODEL is not None
 
 
-def _normalize_predictions(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize GLiNER2's raw output dicts into a stable internal shape.
+def _coerce_field_predictions(raw: Any) -> list[dict[str, Any]]:
+    """A field value is normally `list[{text, confidence, start, end}]`.
 
-    Different gliner2 builds use slightly different key names. We accept any of:
-      - section / schema / category
-      - field / label / type
-      - value / text / span
-      - start / start_char
-      - end / end_char
-      - confidence / score / prob
+    Be defensive against single-dict shapes some gliner2 builds emit and
+    ignore stray strings.
     """
-    normalized: list[dict[str, Any]] = []
-    for item in raw:
-        section = item.get("section") or item.get("schema") or item.get("category")
-        field = item.get("field") or item.get("label") or item.get("type")
-        value = item.get("value") or item.get("text") or item.get("span")
-        start = item.get("start", item.get("start_char", 0))
-        end = item.get("end", item.get("end_char", 0))
-        confidence = item.get("confidence", item.get("score", item.get("prob", 1.0)))
-        if section is None or field is None or value is None:
-            continue
-        normalized.append(
-            {
-                "section": str(section),
-                "field": str(field),
-                "value": str(value),
-                "start": int(start),
-                "end": int(end),
-                "confidence": float(confidence),
-            }
-        )
-    return normalized
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
 
 
-def _assemble_structured(
-    doc_type: str, predictions: list[dict[str, Any]]
-) -> tuple[dict[str, Any], list[Span]]:
-    """Group predictions by section and assemble both `structured` and `spans`.
+def _extract_best_match(matches: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the highest-confidence match from a list of field predictions."""
+    valid = [m for m in matches if isinstance(m.get("text"), str)]
+    if not valid:
+        return None
+    return max(valid, key=lambda m: float(m.get("confidence", 0.0)))
 
-    For array sections we cluster predictions into entries: a new entry starts
-    whenever we see a field name we have already filled for the current entry.
-    This is a heuristic — GLiNER2's native grouping is reused when available
-    via an `entry_id` field, but we fall back gracefully when it isn't present.
+
+def _set_nested(target: dict[str, Any], path: list[str], value: Any) -> None:
+    """Set `value` at the nested dot-path inside `target`, creating dicts along the way."""
+    cursor = target
+    for segment in path[:-1]:
+        existing = cursor.get(segment)
+        if not isinstance(existing, dict):
+            existing = {}
+            cursor[segment] = existing
+        cursor = existing
+    cursor[path[-1]] = value
+
+
+def _assemble_from_compiled(
+    raw: dict[str, Any], compiled: CompiledSchema
+) -> tuple[dict[str, Any], list[Span], set[str]]:
+    """Walk GLiNER2's nested response back into the JSON Schema shape.
+
+    Returns (structured, spans, filled_paths). `filled_paths` is the set of
+    declared paths that actually got a value, so the caller can compute
+    `missing_paths` against the original `compiled.declared_paths`.
     """
     structured: dict[str, Any] = {}
     spans: list[Span] = []
+    filled: set[str] = set()
 
-    # Group by section while preserving prediction order.
-    by_section: dict[str, list[dict[str, Any]]] = {}
-    for pred in predictions:
-        by_section.setdefault(pred["section"], []).append(pred)
+    if not isinstance(raw, dict):
+        return structured, spans, filled
 
-    for section, preds in by_section.items():
-        if is_array_section(doc_type, section):
-            entries: list[dict[str, Any]] = []
-            current: dict[str, Any] = {}
-            for pred in preds:
-                # Honor explicit entry IDs when present.
-                entry_id = pred.get("entry_id")
-                if entry_id is not None and current.get("__entry_id") not in (None, entry_id):
-                    entries.append({k: v for k, v in current.items() if not k.startswith("__")})
-                    current = {}
-                if pred["field"] in current and entry_id is None:
-                    entries.append({k: v for k, v in current.items() if not k.startswith("__")})
-                    current = {}
-                current[pred["field"]] = pred["value"]
-                if entry_id is not None:
-                    current["__entry_id"] = entry_id
+    for structure_name, entries in raw.items():
+        if not isinstance(entries, list):
+            continue
+
+        section_path = compiled.structure_paths.get(structure_name)
+        if section_path is None:
+            # Unknown structure (model hallucinated a section name we didn't ask for).
+            continue
+        is_array = compiled.cardinality.get(structure_name, False)
+
+        assembled_entries: list[dict[str, Any]] = []
+
+        for entry_idx, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            entry_obj: dict[str, Any] = {}
+
+            for field_name, field_value in entry.items():
+                matches = _coerce_field_predictions(field_value)
+                best = _extract_best_match(matches)
+                if best is None:
+                    continue
+
+                value = str(best["text"])
+                confidence = float(best.get("confidence", 1.0))
+                start = int(best.get("start", 0))
+                end = int(best.get("end", 0))
+
+                entry_obj[field_name] = value
+
+                # Compute the wire path used by the caller (Next.js side).
+                if section_path:
+                    parent_dot = ".".join(section_path)
+                else:
+                    parent_dot = ""
+
+                if is_array:
+                    if parent_dot:
+                        path = f"{parent_dot}[{entry_idx}].{field_name}"
+                        declared = f"{parent_dot}.{field_name}"
+                    else:
+                        path = f"[{entry_idx}].{field_name}"
+                        declared = field_name
+                else:
+                    path = f"{parent_dot}.{field_name}" if parent_dot else field_name
+                    declared = path
+
+                filled.add(declared)
                 spans.append(
                     Span(
-                        path=f"{section}[{len(entries)}].{pred['field']}",
-                        value=pred["value"],
-                        start=pred["start"],
-                        end=pred["end"],
-                        confidence=pred["confidence"],
+                        path=path,
+                        value=value,
+                        start=start,
+                        end=end,
+                        confidence=confidence,
                     )
                 )
-            if current:
-                entries.append({k: v for k, v in current.items() if not k.startswith("__")})
-            structured[section] = entries
+
+            if entry_obj:
+                assembled_entries.append(entry_obj)
+
+        if not assembled_entries:
+            continue
+
+        if section_path == []:
+            # Synthetic _root structure — flatten its fields onto the top level.
+            for e in assembled_entries:
+                for k, v in e.items():
+                    structured.setdefault(k, v)
+            continue
+
+        if is_array:
+            _set_nested(structured, section_path, assembled_entries)
         else:
-            obj: dict[str, Any] = structured.setdefault(section, {})
-            for pred in preds:
-                obj[pred["field"]] = pred["value"]
-                spans.append(
-                    Span(
-                        path=f"{section}.{pred['field']}",
-                        value=pred["value"],
-                        start=pred["start"],
-                        end=pred["end"],
-                        confidence=pred["confidence"],
-                    )
-                )
+            # Non-array: merge multi-entry returns so we don't drop fields.
+            merged: dict[str, Any] = {}
+            for e in assembled_entries:
+                for k, v in e.items():
+                    merged.setdefault(k, v)
+            _set_nested(structured, section_path, merged)
 
-    return structured, spans
+    return structured, spans, filled
 
 
-def run_extract(text: str, doc_type: str) -> ExtractResponse:
-    """Run GLiNER2 inference end-to-end. Used by both serve.py and modal_app.py."""
-    schema = get_schema(doc_type)
+def run_extract(
+    text: str,
+    json_schema: dict[str, Any],
+    *,
+    threshold: float = 0.5,
+) -> ExtractResponse:
+    """Run GLiNER2 inference against an arbitrary JSON Schema."""
     model = get_model()
+    compiled = compile_schema(model, json_schema)
 
     started = time.perf_counter()
-    raw = model.extract(text, schema=schema)
+    raw = model.extract(
+        text=text,
+        schema=compiled.gliner_schema,
+        threshold=threshold,
+        format_results=True,
+        include_confidence=True,
+        include_spans=True,
+    )
     duration_ms = int((time.perf_counter() - started) * 1000)
 
-    predictions = _normalize_predictions(raw)
-    structured, spans = _assemble_structured(doc_type, predictions)
+    structured, spans, filled = _assemble_from_compiled(raw, compiled)
+
+    missing_paths = [p for p in compiled.declared_paths if p not in filled and not p.endswith("[]")]
 
     if spans:
         confidences = [s.confidence for s in spans]
@@ -183,4 +243,5 @@ def run_extract(text: str, doc_type: str) -> ExtractResponse:
         avg_confidence=avg_c,
         duration_ms=duration_ms,
         model=MODEL_NAME,
+        missing_paths=missing_paths,
     )

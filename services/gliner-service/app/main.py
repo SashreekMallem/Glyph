@@ -1,8 +1,7 @@
 """FastAPI app — wires HTTP routes to the inference singleton.
 
-This service is internal-only. The Next.js `/api/v1/extract` route proxies to
-us after handling auth, rate limiting, and billing. NEVER expose this port
-publicly.
+Internal-only. Next.js proxies to us after handling auth, rate limiting,
+billing, and schema lookup/synthesis. NEVER expose this port publicly.
 """
 
 from __future__ import annotations
@@ -33,8 +32,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Glyph GLiNER2 Service",
-        description="Internal Layer 2 zero-shot span tagging + structured extraction.",
-        version="0.1.0",
+        description="Internal Layer 2: schema-agnostic span tagging + structured extraction.",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
@@ -57,7 +56,11 @@ def create_app() -> FastAPI:
     @app.post("/v1/extract", response_model=ExtractResponse)
     async def extract(req: ExtractRequest) -> ExtractResponse:
         try:
-            return run_extract(text=req.text, doc_type=req.doc_type)
+            return run_extract(
+                text=req.text,
+                json_schema=req.json_schema,
+                threshold=req.threshold,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         except Exception as e:  # noqa: BLE001

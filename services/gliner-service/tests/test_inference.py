@@ -1,10 +1,11 @@
-"""Offline unit tests — mock the GLiNER2 model and verify our adapters.
+"""Offline unit tests — mock the GLiNER2 model and verify the schema-agnostic
+walker + extractor.
 
-These tests run without downloading model weights and without the gliner2
-package installed. They focus on:
-  - Schema lookup + cardinality parsing
-  - Prediction normalization across possible key-name variants
-  - Structured assembly (objects vs arrays, span paths, entry boundaries)
+Tests cover:
+  - JSON Schema → GLiNER2 fluent compilation
+  - Cardinality derivation from `type: "array"` vs `type: "object"`
+  - Nested-dict response walked back into the JSON Schema shape
+  - missing_paths computation
   - HTTP routes via FastAPI's TestClient
 """
 
@@ -16,25 +17,57 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import inference
-from app.glyph_schemas import CARDINALITY, SCHEMAS, get_schema, is_array_section
-from app.inference import (
-    _assemble_structured,
-    _normalize_predictions,
-    run_extract,
-)
+from app.json_schema_walker import compile_schema
 from app.main import create_app
 
 
+# ---------------------------------------------------------------------------
+# Test doubles
+# ---------------------------------------------------------------------------
+
+
+class FakeStructureBuilder:
+    def __init__(self, parent: "FakeSchemaBuilder", name: str) -> None:
+        self._parent = parent
+        self._name = name
+
+    def field(self, *args: Any, **_kwargs: Any) -> "FakeStructureBuilder":
+        if args:
+            self._parent._fields.setdefault(self._name, []).append(args[0])
+        return self
+
+    def structure(self, name: str) -> "FakeStructureBuilder":
+        return self._parent.structure(name)
+
+    def build(self) -> dict[str, Any]:
+        return self._parent.build()
+
+
+class FakeSchemaBuilder:
+    def __init__(self) -> None:
+        self._sections: list[str] = []
+        self._fields: dict[str, list[str]] = {}
+
+    def structure(self, name: str) -> FakeStructureBuilder:
+        if name not in self._sections:
+            self._sections.append(name)
+        return FakeStructureBuilder(self, name)
+
+    def build(self) -> dict[str, Any]:
+        return {"sections": self._sections, "fields": self._fields}
+
+
 class FakeModel:
-    """Tiny stand-in for GLiNER2."""
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._response = response
+        self.calls: list[dict[str, Any]] = []
 
-    def __init__(self, predictions: list[dict[str, Any]]):
-        self._predictions = predictions
-        self.calls: list[tuple[str, str]] = []
+    def create_schema(self) -> FakeSchemaBuilder:
+        return FakeSchemaBuilder()
 
-    def extract(self, text: str, schema: str) -> list[dict[str, Any]]:
-        self.calls.append((text, schema))
-        return self._predictions
+    def extract(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return self._response
 
 
 @pytest.fixture(autouse=True)
@@ -43,158 +76,296 @@ def _reset_model_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Schema metadata
+# Fixtures: sample JSON Schemas
 # ---------------------------------------------------------------------------
 
 
-def test_schemas_cover_all_doc_types() -> None:
-    assert set(SCHEMAS) == {"resume", "contract", "invoice"}
+def _resume_like_schema() -> dict[str, Any]:
+    """A small JSON Schema with one object section and one array-of-objects section."""
+    return {
+        "type": "object",
+        "properties": {
+            "personal": {
+                "type": "object",
+                "properties": {
+                    "full_name": {"type": "string", "description": "Person's full legal name"},
+                    "email": {"type": "string", "description": "Primary email address"},
+                },
+            },
+            "experience": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "company": {"type": "string", "description": "Employer"},
+                        "title": {"type": "string", "description": "Job title"},
+                    },
+                },
+            },
+        },
+    }
 
 
-def test_get_schema_returns_string() -> None:
-    for doc_type in ("resume", "contract", "invoice"):
-        schema = get_schema(doc_type)
-        assert isinstance(schema, str)
-        assert "@" in schema
+def _ad_hoc_schema() -> dict[str, Any]:
+    """A schema for a totally novel doc type — proves nothing is hardcoded."""
+    return {
+        "type": "object",
+        "properties": {
+            "patient": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Patient name"},
+                    "species": {"type": "string", "description": "Animal species"},
+                },
+            },
+            "visits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string", "description": "Visit date"},
+                        "diagnosis": {"type": "string", "description": "Vet diagnosis"},
+                    },
+                },
+            },
+        },
+    }
 
 
-def test_get_schema_rejects_unknown() -> None:
+def _match(text: str, conf: float, start: int, end: int) -> dict[str, Any]:
+    return {"text": text, "confidence": conf, "start": start, "end": end}
+
+
+# ---------------------------------------------------------------------------
+# compile_schema
+# ---------------------------------------------------------------------------
+
+
+def test_compile_rejects_non_object_top_level() -> None:
+    model = FakeModel({})
     with pytest.raises(ValueError):
-        get_schema("manifesto")
+        compile_schema(model, {"type": "string"})
 
 
-def test_cardinality_resume() -> None:
-    assert is_array_section("resume", "experience") is True
-    assert is_array_section("resume", "education") is True
-    assert is_array_section("resume", "personal") is False
+def test_compile_rejects_empty_properties() -> None:
+    model = FakeModel({})
+    with pytest.raises(ValueError):
+        compile_schema(model, {"type": "object", "properties": {}})
 
 
-def test_cardinality_contract_invoice() -> None:
-    assert CARDINALITY["contract"]["parties"] is True
-    assert CARDINALITY["contract"]["payment_terms"] is False
-    assert CARDINALITY["invoice"]["line_items"] is True
-    assert CARDINALITY["invoice"]["vendor"] is False
+def test_compile_resume_like_schema() -> None:
+    model = FakeModel({})
+    compiled = compile_schema(model, _resume_like_schema())
+    # Both top-level sections registered.
+    assert "personal" in compiled.cardinality
+    assert "experience" in compiled.cardinality
+    # Cardinality derived from JSON Schema type.
+    assert compiled.cardinality["personal"] is False
+    assert compiled.cardinality["experience"] is True
+    # Declared paths captured.
+    assert "personal.full_name" in compiled.declared_paths
+    assert "personal.email" in compiled.declared_paths
+    assert "experience.company" in compiled.declared_paths
 
 
-# ---------------------------------------------------------------------------
-# Prediction normalization
-# ---------------------------------------------------------------------------
+def test_compile_ad_hoc_schema_works_too() -> None:
+    """Proves nothing is doc-type specific — vet records work without code changes."""
+    model = FakeModel({})
+    compiled = compile_schema(model, _ad_hoc_schema())
+    assert compiled.cardinality == {"patient": False, "visits": True}
+    assert set(compiled.declared_paths) == {
+        "patient.name",
+        "patient.species",
+        "visits.date",
+        "visits.diagnosis",
+    }
 
 
-def test_normalize_handles_variant_keys() -> None:
-    raw = [
-        {
-            "section": "personal",
-            "field": "full_name",
-            "value": "Jane Doe",
-            "start": 0,
-            "end": 8,
-            "confidence": 0.9,
+def test_compile_top_level_scalars_collected_into_root() -> None:
+    model = FakeModel({})
+    schema = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Document title"},
+            "tags": {"type": "array", "items": {"type": "string"}},
         },
-        {
-            "schema": "personal",
-            "label": "email",
-            "text": "jane@x.com",
-            "start_char": 10,
-            "end_char": 20,
-            "score": 0.8,
-        },
-    ]
-    out = _normalize_predictions(raw)
-    assert len(out) == 2
-    assert out[0]["field"] == "full_name"
-    assert out[1]["field"] == "email"
-    assert out[1]["confidence"] == 0.8
-
-
-def test_normalize_drops_incomplete_rows() -> None:
-    raw = [{"section": "personal", "field": "email"}]  # missing value
-    assert _normalize_predictions(raw) == []
+    }
+    compiled = compile_schema(model, schema)
+    assert "_root" in compiled.cardinality
+    assert compiled.cardinality["_root"] is False
+    assert "title" in compiled.declared_paths
+    assert "tags[]" in compiled.declared_paths
 
 
 # ---------------------------------------------------------------------------
-# Structured assembly
+# _assemble_from_compiled — walk model output back into JSON Schema shape
 # ---------------------------------------------------------------------------
 
 
-def test_assemble_object_section() -> None:
-    preds = [
-        {"section": "personal", "field": "full_name", "value": "Jane", "start": 0, "end": 4, "confidence": 0.9},
-        {"section": "personal", "field": "email", "value": "j@x.com", "start": 5, "end": 12, "confidence": 0.8},
-    ]
-    structured, spans = _assemble_structured("resume", preds)
-    assert structured == {"personal": {"full_name": "Jane", "email": "j@x.com"}}
-    assert [s.path for s in spans] == ["personal.full_name", "personal.email"]
+def test_assemble_collapses_single_entry_object_section() -> None:
+    model = FakeModel({})
+    compiled = compile_schema(model, _resume_like_schema())
+    raw: dict[str, Any] = {
+        "personal": [
+            {
+                "full_name": [_match("Jane Doe", 0.99, 0, 8)],
+                "email": [_match("jane@x.com", 0.97, 10, 20)],
+            }
+        ]
+    }
+    structured, spans, filled = inference._assemble_from_compiled(raw, compiled)
+    assert structured == {
+        "personal": {"full_name": "Jane Doe", "email": "jane@x.com"}
+    }
+    assert filled == {"personal.full_name", "personal.email"}
+    assert {s.path for s in spans} == {"personal.full_name", "personal.email"}
 
 
-def test_assemble_array_section_splits_on_repeat() -> None:
-    preds = [
-        {"section": "experience", "field": "company", "value": "Acme", "start": 0, "end": 4, "confidence": 0.9},
-        {"section": "experience", "field": "title", "value": "Eng", "start": 5, "end": 8, "confidence": 0.9},
-        {"section": "experience", "field": "company", "value": "Globex", "start": 9, "end": 15, "confidence": 0.9},
-        {"section": "experience", "field": "title", "value": "Lead", "start": 16, "end": 20, "confidence": 0.9},
-    ]
-    structured, spans = _assemble_structured("resume", preds)
+def test_assemble_preserves_array_section_entries() -> None:
+    model = FakeModel({})
+    compiled = compile_schema(model, _resume_like_schema())
+    raw: dict[str, Any] = {
+        "experience": [
+            {
+                "company": [_match("Acme", 0.95, 0, 4)],
+                "title": [_match("Engineer", 0.9, 5, 13)],
+            },
+            {
+                "company": [_match("Globex", 0.96, 20, 26)],
+                "title": [_match("Lead", 0.92, 27, 31)],
+            },
+        ]
+    }
+    structured, spans, _filled = inference._assemble_from_compiled(raw, compiled)
     assert structured["experience"] == [
-        {"company": "Acme", "title": "Eng"},
+        {"company": "Acme", "title": "Engineer"},
         {"company": "Globex", "title": "Lead"},
     ]
-    assert [s.path for s in spans] == [
-        "experience[0].company",
-        "experience[0].title",
-        "experience[1].company",
-        "experience[1].title",
-    ]
+    paths = {s.path for s in spans}
+    assert "experience[0].company" in paths
+    assert "experience[1].title" in paths
 
 
-def test_assemble_array_honors_entry_id() -> None:
-    preds = [
-        {"section": "experience", "field": "company", "value": "A", "start": 0, "end": 1, "confidence": 1.0, "entry_id": 1},
-        {"section": "experience", "field": "company", "value": "B", "start": 2, "end": 3, "confidence": 1.0, "entry_id": 2},
-    ]
-    structured, _ = _assemble_structured("resume", preds)
-    assert structured["experience"] == [{"company": "A"}, {"company": "B"}]
+def test_assemble_picks_highest_confidence_match() -> None:
+    model = FakeModel({})
+    compiled = compile_schema(model, _resume_like_schema())
+    raw: dict[str, Any] = {
+        "personal": [
+            {
+                "full_name": [
+                    _match("Jane", 0.5, 0, 4),
+                    _match("Jane Doe", 0.97, 0, 8),
+                ],
+            }
+        ]
+    }
+    structured, _, _ = inference._assemble_from_compiled(raw, compiled)
+    assert structured["personal"]["full_name"] == "Jane Doe"
+
+
+def test_assemble_ignores_unknown_structure_names() -> None:
+    """Model hallucinates a section we didn't ask for — drop it silently."""
+    model = FakeModel({})
+    compiled = compile_schema(model, _resume_like_schema())
+    raw: dict[str, Any] = {
+        "personal": [{"full_name": [_match("Jane", 0.9, 0, 4)]}],
+        "ghost_section": [{"x": [_match("y", 0.9, 0, 1)]}],
+    }
+    structured, _, _ = inference._assemble_from_compiled(raw, compiled)
+    assert "ghost_section" not in structured
+    assert structured["personal"]["full_name"] == "Jane"
 
 
 # ---------------------------------------------------------------------------
-# run_extract end-to-end (with fake model)
+# run_extract — end-to-end with fake model
 # ---------------------------------------------------------------------------
 
 
 def test_run_extract_with_fake_model(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeModel(
-        [
-            {"section": "personal", "field": "full_name", "value": "Jane Doe", "start": 0, "end": 8, "confidence": 0.93},
-            {"section": "personal", "field": "email", "value": "jane@x.com", "start": 10, "end": 20, "confidence": 0.71},
-        ]
+        {
+            "personal": [
+                {
+                    "full_name": [_match("Jane Doe", 0.93, 0, 8)],
+                    "email": [_match("jane@x.com", 0.71, 10, 20)],
+                }
+            ]
+        }
     )
     monkeypatch.setattr(inference, "_MODEL", fake)
 
-    resp = run_extract(text="Jane Doe — jane@x.com", doc_type="resume")
-    assert resp.model == inference.MODEL_NAME
+    resp = inference.run_extract(
+        text="Jane Doe — jane@x.com",
+        json_schema=_resume_like_schema(),
+    )
     assert resp.structured["personal"]["full_name"] == "Jane Doe"
     assert resp.min_confidence == pytest.approx(0.71)
     assert resp.avg_confidence == pytest.approx(0.82)
     assert len(resp.spans) == 2
-    assert fake.calls[0][0] == "Jane Doe — jane@x.com"
+    # The fake model recorded extract kwargs.
+    assert fake.calls[0]["text"] == "Jane Doe — jane@x.com"
+    assert fake.calls[0]["include_confidence"] is True
+
+
+def test_run_extract_reports_missing_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Schema declares more fields than the model fills — they show up as missing."""
+    fake = FakeModel(
+        {"personal": [{"full_name": [_match("Jane Doe", 0.93, 0, 8)]}]}
+    )
+    monkeypatch.setattr(inference, "_MODEL", fake)
+
+    resp = inference.run_extract(text="Jane Doe", json_schema=_resume_like_schema())
+    # `personal.email` and the entire `experience.*` block are missing.
+    assert "personal.email" in resp.missing_paths
+    assert "experience.company" in resp.missing_paths
+    assert "experience.title" in resp.missing_paths
+    assert "personal.full_name" not in resp.missing_paths
 
 
 def test_run_extract_empty_predictions(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(inference, "_MODEL", FakeModel([]))
-    resp = run_extract(text="nothing to extract", doc_type="invoice")
+    monkeypatch.setattr(inference, "_MODEL", FakeModel({}))
+    resp = inference.run_extract(text="nothing", json_schema=_resume_like_schema())
     assert resp.spans == []
     assert resp.structured == {}
     assert resp.min_confidence == 0.0
-    assert resp.avg_confidence == 0.0
+
+
+def test_run_extract_ad_hoc_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Python service has no idea what 'veterinary' means — it just walks the schema."""
+    fake = FakeModel(
+        {
+            "patient": [
+                {
+                    "name": [_match("Whiskers", 0.95, 0, 8)],
+                    "species": [_match("Cat", 0.9, 10, 13)],
+                }
+            ],
+            "visits": [
+                {
+                    "date": [_match("2026-05-22", 0.88, 20, 30)],
+                    "diagnosis": [_match("ear infection", 0.85, 32, 45)],
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(inference, "_MODEL", fake)
+
+    resp = inference.run_extract(
+        text="Whiskers — Cat — 2026-05-22 — ear infection",
+        json_schema=_ad_hoc_schema(),
+    )
+    assert resp.structured["patient"]["name"] == "Whiskers"
+    assert resp.structured["visits"][0]["diagnosis"] == "ear infection"
+    assert resp.missing_paths == []
 
 
 # ---------------------------------------------------------------------------
-# HTTP routes (no real model)
+# HTTP routes
 # ---------------------------------------------------------------------------
 
 
 def test_healthz(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(inference, "_MODEL", FakeModel([]))
+    monkeypatch.setattr(inference, "_MODEL", FakeModel({}))
     app = create_app()
     with TestClient(app) as client:
         r = client.get("/healthz")
@@ -204,11 +375,9 @@ def test_healthz(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["model"] == inference.MODEL_NAME
 
 
-def test_extract_route(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_extract_route_with_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeModel(
-        [
-            {"section": "personal", "field": "full_name", "value": "Jane Doe", "start": 0, "end": 8, "confidence": 0.93},
-        ]
+        {"personal": [{"full_name": [_match("Jane Doe", 0.93, 0, 8)]}]}
     )
     monkeypatch.setattr(inference, "_MODEL", fake)
 
@@ -216,21 +385,23 @@ def test_extract_route(monkeypatch: pytest.MonkeyPatch) -> None:
     with TestClient(app) as client:
         r = client.post(
             "/v1/extract",
-            json={"text": "Jane Doe", "doc_type": "resume"},
+            json={
+                "text": "Jane Doe",
+                "json_schema": _resume_like_schema(),
+            },
         )
     assert r.status_code == 200
     body = r.json()
     assert body["structured"]["personal"]["full_name"] == "Jane Doe"
     assert body["spans"][0]["path"] == "personal.full_name"
-    assert body["model"] == inference.MODEL_NAME
 
 
-def test_extract_rejects_unknown_doc_type() -> None:
+def test_extract_route_rejects_invalid_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(inference, "_MODEL", FakeModel({}))
     app = create_app()
     with TestClient(app) as client:
         r = client.post(
             "/v1/extract",
-            json={"text": "anything", "doc_type": "manifesto"},
+            json={"text": "anything", "json_schema": {"type": "string"}},
         )
-    # Pydantic Literal validation fires before our handler runs.
-    assert r.status_code == 422
+    assert r.status_code == 400

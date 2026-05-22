@@ -2,11 +2,9 @@
  * Server-side document type + template registry.
  *
  * Bridges the DB-backed `document_types` / `document_templates` tables
- * to the rest of the app. The three built-in types ("contract" |
- * "resume" | "invoice") also have compile-time Zod schemas in
- * `@glyph/schema-library`; for them we prefer the compile-time schema
- * (it's what the PDF renderer and MCP heuristic use). For every other
- * type we compile the stored JSON Schema to Zod at runtime.
+ * to the rest of the app. Every schema — including the legacy
+ * `contract`/`resume`/`invoice` keys — lives in the `document_types`
+ * table now. We compile the stored JSON Schema to Zod at runtime.
  *
  * All functions here return cache-friendly data — callers may memoise
  * for the duration of a request.
@@ -15,10 +13,8 @@
 import { eq, sql as dsql } from "drizzle-orm";
 import type { ZodTypeAny } from "zod";
 import {
-  getSchema as getBuiltInSchema,
   isBuiltInDocumentType,
   jsonSchemaToZod,
-  toJsonSchema,
 } from "@glyph/schema-library";
 
 import { db } from "@/db";
@@ -62,18 +58,17 @@ export interface ResolvedSchema {
   readonly jsonSchema: Record<string, unknown> | null;
   readonly compositionId: string | null;
   readonly blockIds: readonly string[] | null;
-  readonly source: "blocks" | "custom_type" | "builtin";
+  readonly source: "blocks" | "custom_type";
 }
 
 /**
- * Resolves a document schema across all four modes:
+ * Resolves a document schema across all three modes:
  *   1. blocks: caller passes explicit `blockIds` -> resolveComposition.
  *   2. blocks-default: caller passes only `documentType` and that domain
  *      has REQUIRED blocks registered -> defaultCompositionForDomain.
- *   3. custom_type: domain has no blocks but exists in `documentTypes`.
- *   4. builtin: compile-time Zod for resume / contract / invoice
- *      (last resort — should rarely trigger because all three are
- *      seeded into `schema_blocks`).
+ *   3. custom_type: domain has no blocks but exists in `documentTypes`
+ *      (this is where every system type — contract/resume/invoice — and
+ *      every user-defined type lives).
  *
  * Throws on unknown document types.
  */
@@ -117,11 +112,11 @@ export async function resolveSchema(args: {
         source: "blocks",
       };
     } catch {
-      // No required blocks — fall through to custom_type / builtin.
+      // No required blocks — fall through to custom_type lookup.
     }
   }
 
-  // 3. Custom user-registered type.
+  // 3. Type stored in `document_types` (system or user-registered).
   const row = await getTypeRow(documentType);
   if (row !== null) {
     const json = row.jsonSchema as Record<string, unknown>;
@@ -131,24 +126,6 @@ export async function resolveSchema(args: {
       compositionId: null,
       blockIds: null,
       source: "custom_type",
-    };
-  }
-
-  // 4. Built-in compile-time schema.
-  if (isBuiltInType(documentType)) {
-    const zod = getBuiltInSchema(documentType) as ZodTypeAny;
-    let jsonSchema: Record<string, unknown> | null = null;
-    try {
-      jsonSchema = toJsonSchema(zod) as Record<string, unknown>;
-    } catch {
-      jsonSchema = null;
-    }
-    return {
-      zod,
-      jsonSchema,
-      compositionId: null,
-      blockIds: null,
-      source: "builtin",
     };
   }
 

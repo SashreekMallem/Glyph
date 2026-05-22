@@ -14,6 +14,10 @@
 
 import type { DocumentType } from "@glyph/schema-library";
 
+// DocumentType is now `string` — these regex extractors only fire for the
+// three legacy keys ("contract"/"resume"/"invoice"). Any other key falls
+// through to a no-op result (the caller should use the LLM-grade path).
+
 export interface HeuristicResult {
   readonly extracted: Record<string, unknown>;
   readonly missingFields: readonly string[];
@@ -191,6 +195,11 @@ function extractInvoice(text: string): HeuristicResult {
 
 /**
  * Run the heuristic extractor for the given document type.
+ *
+ * Only the three legacy keys ("contract"/"resume"/"invoice") have
+ * dedicated regex extractors. For any other key we return an empty
+ * extraction and signal `valid: false` so the caller knows to fall back
+ * to the LLM-grade path.
  */
 export function extractHeuristic(
   type: DocumentType,
@@ -203,5 +212,11 @@ export function extractHeuristic(
       return extractResume(text);
     case "invoice":
       return extractInvoice(text);
+    default:
+      return {
+        extracted: { document_type: type, schema_version: "1.0" },
+        missingFields: [],
+        valid: false,
+      };
   }
 }

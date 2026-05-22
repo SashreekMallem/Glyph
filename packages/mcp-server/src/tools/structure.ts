@@ -1,6 +1,4 @@
 import { z } from 'zod';
-import { getSchema, isBuiltInDocumentType } from '@glyph/schema-library';
-import { extractHeuristic } from '../extractor.js';
 
 export const structureTool = {
   name: 'structure_document',
@@ -28,7 +26,7 @@ RETURNS:
     properties: {
       document_type: {
         type: 'string',
-        description: 'Any document type key — built-in (resume, contract, invoice) or custom (e.g. nda, offer_letter, purchase_order, medical_record).',
+        description: 'Any document type key registered in your Glyph account (e.g. resume, contract, invoice, nda, offer_letter, purchase_order, medical_record).',
       },
       raw_text: { type: 'string', minLength: 10 },
       context: { type: 'string' },
@@ -67,61 +65,42 @@ export async function structureHandler(
   }
   const { document_type, raw_text, api_key } = parsed.data;
 
-  // LLM-grade path (built-in or custom): delegate to /api/v1/extract
-  // which resolves the schema server-side (supports tenant custom types).
-  if (api_key && deps.glyphApiUrl) {
-    const fetcher = deps.fetch ?? fetch;
-    try {
-      const res = await fetcher(`${deps.glyphApiUrl}/api/v1/extract`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${api_key}`,
-        },
-        body: JSON.stringify({ raw_text, document_type }),
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        return {
-          isError: true,
-          content: [{ type: 'text', text: `Glyph API error (${res.status}): ${body}` }],
-        };
-      }
-      const json = (await res.json()) as { data: unknown };
-      return { content: [{ type: 'text', text: JSON.stringify(json.data) }] };
-    } catch (err) {
+  // All document types — including the legacy "contract"/"resume"/"invoice"
+  // keys — now live in the document_types DB table, so we always delegate
+  // to /api/v1/extract for tenant-aware schema resolution.
+  if (!api_key || !deps.glyphApiUrl) {
+    return {
+      isError: true,
+      content: [{
+        type: 'text',
+        text: `Document type "${document_type}" requires an api_key for server-side schema resolution. Pass your Glyph API key.`,
+      }],
+    };
+  }
+
+  const fetcher = deps.fetch ?? fetch;
+  try {
+    const res = await fetcher(`${deps.glyphApiUrl}/api/v1/extract`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${api_key}`,
+      },
+      body: JSON.stringify({ raw_text, document_type }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
       return {
         isError: true,
-        content: [{ type: 'text', text: `Fetch failed: ${err instanceof Error ? err.message : 'unknown'}` }],
+        content: [{ type: 'text', text: `Glyph API error (${res.status}): ${body}` }],
       };
     }
-  }
-
-  // Heuristic fallback — only works for built-in types offline.
-  if (!isBuiltInDocumentType(document_type)) {
+    const json = (await res.json()) as { data: unknown };
+    return { content: [{ type: 'text', text: JSON.stringify(json.data) }] };
+  } catch (err) {
     return {
       isError: true,
-      content: [{
-        type: 'text',
-        text: `Custom document type "${document_type}" requires an api_key for server-side schema resolution. Pass your Glyph API key.`,
-      }],
+      content: [{ type: 'text', text: `Fetch failed: ${err instanceof Error ? err.message : 'unknown'}` }],
     };
   }
-
-  const { extracted } = extractHeuristic(document_type, raw_text);
-  const schema = getSchema(document_type);
-  const result = schema.safeParse(extracted);
-  if (!result.success) {
-    return {
-      isError: true,
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          valid: false,
-          errors: result.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
-        }),
-      }],
-    };
-  }
-  return { content: [{ type: 'text', text: JSON.stringify(result.data) }] };
 }

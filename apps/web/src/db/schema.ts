@@ -27,25 +27,10 @@ import {
 } from "drizzle-orm/pg-core";
 
 export const planEnum = pgEnum("plan", ["free", "pro", "team", "enterprise"]);
-/**
- * NOTE on `documentTypeEnum`:
- *
- * This enum is kept for backwards compatibility with existing rows (and
- * the three built-in types). The authoritative registry is now the
- * `documentTypes` table, which supports runtime-added types. New types
- * live only in that table — the enum is NOT extended.
- *
- * `documents.documentType` stores the enum value when it is one of the
- * built-ins ("contract" | "resume" | "invoice"). For user-defined types
- * the column stores `"custom"` and `documents.documentTypeKey` points
- * at a `documentTypes.key` row that carries the full schema + template.
- */
-export const documentTypeEnum = pgEnum("document_type", [
-  "contract",
-  "resume",
-  "invoice",
-  "custom",
-]);
+// Doc types are stored as plain text. The authoritative registry is the
+// `documentTypes` table, which supports any runtime-added type (synthesized
+// by Gemini for novel domains, proposed via the MCP tool, etc.). Don't add
+// an enum here — that would defeat the dynamic-schema design.
 export const exportFormatEnum = pgEnum("export_format", [
   "pdf",
   "docx",
@@ -164,7 +149,7 @@ export const documents = pgTable(
     // references auth.users(id)
     userId: uuid("user_id").notNull(),
     title: text("title").notNull(),
-    documentType: documentTypeEnum("document_type").notNull(),
+    documentType: text("document_type").notNull(),
     /**
      * Stable key into `document_types.key`. For built-ins this equals
      * the enum value ("contract" | "resume" | "invoice"). For custom
@@ -270,7 +255,7 @@ export const apiUsage = pgTable(
       .notNull()
       .references(() => apiKeys.id, { onDelete: "cascade" }),
     documentId: uuid("document_id"),
-    documentType: documentTypeEnum("document_type"),
+    documentType: text("document_type"),
     processedAt: timestamp("processed_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -579,7 +564,7 @@ export const spanCorrections = pgTable(
     docId: uuid("doc_id").references(() => documents.id, {
       onDelete: "set null",
     }),
-    docType: documentTypeEnum("doc_type").notNull(),
+    docType: text("doc_type").notNull(),
     /** Dot-notation path into the validated payload (e.g. "personal.full_name"). */
     path: text("path").notNull(),
     /** What the upstream extractor returned. Null if the field was empty. */
