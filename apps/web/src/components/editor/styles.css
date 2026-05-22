@@ -119,6 +119,21 @@
   z-index: 10;
 }
 
+/* ─────────────────────────────────────────────────────────────────────── */
+/* Low-confidence spans — Grammarly-style dotted underline.               */
+/* Triggered by `confidence < 0.85` on the GlyphFieldMark, which renders   */
+/* `data-glyph-uncertain="true"` on the span.                              */
+/* ─────────────────────────────────────────────────────────────────────── */
+
+[data-glyph-uncertain="true"] {
+  text-decoration: underline dotted rgba(245, 158, 11, 0.7);
+  text-underline-offset: 3px;
+  cursor: help;
+}
+[data-glyph-uncertain="true"]:hover {
+  background-color: rgba(245, 158, 11, 0.08);
+}
+
 /* Pulse animation triggered by side-panel click-to-jump */
 @keyframes glyph-field-pulse {
   0% {

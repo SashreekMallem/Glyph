@@ -1,0 +1,49 @@
+[project]
+name = "glyph-gliner-service"
+version = "0.1.0"
+description = "Glyph Layer 2 — zero-shot span tagging + structured extraction via GLiNER2"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Glyph" }]
+license = { text = "Proprietary" }
+
+dependencies = [
+    "gliner2>=0.1.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "python-multipart>=0.0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.27.0",
+    "mypy>=1.11.0",
+    "ruff>=0.6.0",
+]
+modal = [
+    "modal>=0.64.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true

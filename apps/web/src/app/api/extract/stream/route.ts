@@ -67,6 +67,113 @@ interface ReqBody {
   sessionId?: string;
 }
 
+// ---------------------------------------------------------------------------
+// GLiNER2 fast-path
+//
+// The Python GLiNER2 service (env: GLINER_SERVICE_URL) is consulted before
+// Gemini when we have full document text. Its response is shaped exactly
+// like below; we treat any deviation as a transient miss and fall through
+// to Gemini. The confidence gate is the only knob — `min_confidence >=
+// CONFIDENCE_GATE` means we trust GLiNER2 enough to skip Gemini entirely
+// for this turn.
+// ---------------------------------------------------------------------------
+
+interface GlinerSpan {
+  readonly path: string;
+  readonly value: unknown;
+  readonly start: number;
+  readonly end: number;
+  readonly confidence: number;
+}
+
+interface GlinerResponse {
+  readonly spans: readonly GlinerSpan[];
+  readonly structured: Record<string, unknown>;
+  readonly min_confidence: number;
+  readonly avg_confidence: number;
+  readonly duration_ms: number;
+  readonly model: string;
+}
+
+/** Minimum GLiNER2 confidence required to short-circuit Gemini. */
+const GLINER_CONFIDENCE_GATE = 0.85;
+
+/** Hard timeout for the GLiNER2 fast-path call (ms). */
+const GLINER_TIMEOUT_MS = 2_000;
+
+/**
+ * Convert a dot-notation path (`"personal.full_name"`, `"items.0.qty"`)
+ * to an RFC 6901 JSON pointer (`"/personal/full_name"`, `"/items/0/qty"`).
+ * Per spec, `/` and `~` inside path segments are escaped to `~1`/`~0`;
+ * GLiNER2 paths are field-keyed so this is mostly belt-and-braces.
+ */
+function toJsonPointer(dotPath: string): string {
+  const segments = dotPath.split(".");
+  const escaped = segments.map((seg) =>
+    seg.replace(/~/g, "~0").replace(/\//g, "~1"),
+  );
+  return "/" + escaped.join("/");
+}
+
+/**
+ * Project GLiNER2 spans onto an RFC 6902 patch. Every span becomes a
+ * single `add` op carrying the source-text offsets so downstream sync
+ * (drift detection) can find the field again when the user edits text.
+ * Spans are emitted in document-order so the editor's path-by-path
+ * highlighter animates cleanly.
+ */
+function spansToPatches(
+  spans: readonly GlinerSpan[],
+): ReadonlyArray<{
+  op: "add";
+  path: string;
+  value: unknown;
+  srcStart: number;
+  srcEnd: number;
+}> {
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  return sorted.map((s) => ({
+    op: "add" as const,
+    path: toJsonPointer(s.path),
+    value: s.value,
+    srcStart: s.start,
+    srcEnd: s.end,
+  }));
+}
+
+/**
+ * Call the GLiNER2 service. Returns `null` if the service is not
+ * configured, the call times out, or the response is malformed — every
+ * non-success case falls through to Gemini.
+ */
+async function callGliner(args: {
+  readonly url: string;
+  readonly text: string;
+  readonly docType: string;
+}): Promise<GlinerResponse | null> {
+  try {
+    const r = await fetch(`${args.url}/v1/extract`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: args.text, doc_type: args.docType }),
+      signal: AbortSignal.timeout(GLINER_TIMEOUT_MS),
+    });
+    if (!r.ok) return null;
+    const parsed = (await r.json()) as unknown;
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      !Array.isArray((parsed as { spans?: unknown }).spans) ||
+      typeof (parsed as { min_confidence?: unknown }).min_confidence !== "number"
+    ) {
+      return null;
+    }
+    return parsed as GlinerResponse;
+  } catch {
+    return null;
+  }
+}
+
 function isReqBody(v: unknown): v is ReqBody {
   if (!v || typeof v !== "object") return false;
   const o = v as Record<string, unknown>;
@@ -483,8 +590,145 @@ export async function POST(req: NextRequest): Promise<Response> {
       let sawError = false;
       let patchSeq = 0;
 
+      // -------------------------------------------------------------------
+      // Layer 2: GLiNER2 fast-path.
+      //
+      // When GLiNER2 is configured AND we have full document text, ask it
+      // first. If its `min_confidence` clears the gate we emit its spans
+      // as RFC 6902 patches and skip the Gemini stream entirely — same
+      // wire format the editor already understands, just a different
+      // source. Below the gate we still log the result for offline
+      // analysis but defer to Gemini.
+      //
+      // Failures (timeout, non-2xx, network error) silently fall through
+      // to Gemini; the user never sees a fast-path failure.
+      // -------------------------------------------------------------------
+      const glinerUrl = process.env.GLINER_SERVICE_URL;
+      let glinerResult: GlinerResponse | null = null;
+      let skipGemini = false;
+      if (glinerUrl && body.fullText) {
+        const glinerStart = Date.now();
+        try {
+          glinerResult = await callGliner({
+            url: glinerUrl,
+            text: body.fullText,
+            docType: body.schemaType,
+          });
+        } catch (err) {
+          log({
+            requestId,
+            userId,
+            docId: body.docId,
+            sessionId,
+            event: "gliner_error",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        log({
+          requestId,
+          userId,
+          docId: body.docId,
+          sessionId,
+          event: "gliner_call",
+          ok: glinerResult !== null,
+          durationMs: Date.now() - glinerStart,
+          ...(glinerResult
+            ? {
+                spans: glinerResult.spans.length,
+                minConfidence: glinerResult.min_confidence,
+                avgConfidence: glinerResult.avg_confidence,
+                upstreamMs: glinerResult.duration_ms,
+                model: glinerResult.model,
+              }
+            : {}),
+        });
+        if (
+          glinerResult !== null &&
+          glinerResult.min_confidence >= GLINER_CONFIDENCE_GATE
+        ) {
+          skipGemini = true;
+        }
+      }
+
       try {
-        for await (const ev of streamExtract(extractReq, {
+        if (skipGemini && glinerResult !== null) {
+          // GLiNER2 fast-path: emit synthetic patches, then `done`.
+          //
+          // We deliberately re-use the existing patch SSE event shape so
+          // `useDocumentExtraction` doesn't need to change — the only
+          // observable difference for the client is that no `usage` event
+          // is emitted (GLiNER2 is local, no token spend) and the stream
+          // ends faster.
+          await metric.increment("extract.gliner_hit");
+          logExtractEvent({
+            event: "extract.gliner_hit",
+            requestId,
+            userId,
+            docId: body.docId,
+            sessionId,
+            schemaVersion,
+            extra: {
+              spans: glinerResult.spans.length,
+              minConfidence: glinerResult.min_confidence,
+              avgConfidence: glinerResult.avg_confidence,
+              upstreamMs: glinerResult.duration_ms,
+              model: glinerResult.model,
+            },
+          });
+          const patches = spansToPatches(glinerResult.spans);
+          if (patches.length > 0) {
+            // Persist each op as an episode (best effort) — mirror the
+            // Gemini-path's behaviour so historical timelines stay
+            // consistent regardless of which extractor produced them.
+            for (const op of patches) {
+              try {
+                await appendEpisode(db as never, {
+                  sessionId: sessionId!,
+                  docId: body.docId,
+                  userId,
+                  patch: [op],
+                  schemaVersion,
+                  model: `gliner:${glinerResult.model}`,
+                });
+              } catch (err) {
+                log({
+                  requestId,
+                  userId,
+                  docId: body.docId,
+                  sessionId,
+                  event: "episode_error",
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+            safeEnqueue(
+              sseEvent("patch", { patches, seq: patchSeq++ }),
+            );
+          }
+        } else {
+          // Gemini fallback (the original path). If GLiNER2 produced a
+          // sub-gate result it is still informative — we log a metric so
+          // the offline pipeline can correlate gate misses with the
+          // structured output. `StreamExtractRequest` has no `hint`
+          // field today; surfacing the hint to Gemini is left to the
+          // verification agent.
+          await metric.increment("extract.gemini_fallback");
+          logExtractEvent({
+            event: "extract.gemini_fallback",
+            requestId,
+            userId,
+            docId: body.docId,
+            sessionId,
+            schemaVersion,
+            extra: {
+              glinerAttempted: glinerResult !== null,
+              glinerMinConfidence: glinerResult?.min_confidence ?? null,
+            },
+          });
+        }
+
+        // Run Gemini only if we didn't short-circuit on the GLiNER fast path.
+        if (!skipGemini) for await (const ev of streamExtract(extractReq, {
           apiKey,
           signal: aborter.signal,
           ...(cacheRef ? { cacheRef } : {}),

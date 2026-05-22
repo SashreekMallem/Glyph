@@ -64,6 +64,10 @@ import { BubbleMenu } from "./menus/BubbleMenu";
 import { FloatingMenu } from "./menus/FloatingMenu";
 import { SlashCommand } from "./menus/SlashCommand";
 import { CommandList, getSuggestionItems } from "./menus/CommandList";
+import {
+  CorrectionPopover,
+  type CorrectionDocType,
+} from "./CorrectionPopover";
 
 // Create lowlight instance for syntax highlighting
 const lowlight = createLowlight(common);
@@ -127,6 +131,14 @@ export function TiptapEditor({
   const extractTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [editorText, setEditorText] = useState<string>("");
+  const [correction, setCorrection] = useState<{
+    anchorEl: HTMLElement;
+    path: string;
+    value: string;
+    label: string;
+    confidence: number;
+    region: [number, number] | null;
+  } | null>(null);
 
   const editor = useEditor(
     {
@@ -267,6 +279,53 @@ export function TiptapEditor({
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
   }, []);
+
+  // Open the correction popover when the user clicks a low-confidence span.
+  // We listen on the editor DOM (not document) so the listener tears down
+  // with the editor view, and we read the mark's metadata straight from the
+  // span's data-* attributes — no need to resolve ProseMirror positions for
+  // a passive read.
+  useEffect(() => {
+    if (!editor) return;
+    const root = editor.view.dom;
+    const onClick = (ev: MouseEvent) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLElement)) return;
+      const span = target.closest<HTMLElement>(
+        'span[data-glyph-uncertain="true"]',
+      );
+      if (!span) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const path = span.getAttribute("data-glyph-field") ?? "";
+      const confRaw = span.getAttribute("data-glyph-confidence");
+      const conf = confRaw === null ? 0 : Number.parseFloat(confRaw);
+      const regionRaw = span.getAttribute("data-region");
+      let region: [number, number] | null = null;
+      if (regionRaw) {
+        const [aRaw, bRaw] = regionRaw.split(",");
+        const a = aRaw !== undefined ? Number.parseInt(aRaw, 10) : NaN;
+        const b = bRaw !== undefined ? Number.parseInt(bRaw, 10) : NaN;
+        if (Number.isFinite(a) && Number.isFinite(b)) {
+          region = [a, b];
+        }
+      }
+      setCorrection({
+        anchorEl: span,
+        path,
+        value: span.textContent ?? "",
+        // Last path segment is a reasonable human label fallback until the
+        // pipeline starts emitting an explicit `label` attr.
+        label: path.split(".").pop() ?? path,
+        confidence: Number.isFinite(conf) ? conf : 0,
+        region,
+      });
+    };
+    root.addEventListener("click", onClick);
+    return () => {
+      root.removeEventListener("click", onClick);
+    };
+  }, [editor]);
 
   // Listen for custom export events from the Page header
   useEffect(() => {
@@ -441,6 +500,71 @@ glyph_signature: "${extraction.signature || ""}"
           {editor && <BubbleMenu editor={editor} />}
           {editor && <FloatingMenu editor={editor} />}
           <EditorContent editor={editor} className="glyph-editor-surface" />
+          {editor && correction ? (
+            <CorrectionPopover
+              open={true}
+              anchorEl={correction.anchorEl}
+              path={correction.path}
+              currentValue={correction.value}
+              currentLabel={correction.label}
+              confidence={correction.confidence}
+              docId={extraction?.docId}
+              docType={asCorrectionDocType(extraction?.schemaType)}
+              region={correction.region}
+              sourceText={editorText}
+              onClose={() => setCorrection(null)}
+              onAccept={(newValue, newLabel) => {
+                // The user edited the value/label — update the mark in place
+                // so the side panel and downstream consumers see the fix.
+                // We rewrite the text only if the value changed; the label
+                // is encoded in the `path` attribute today, so we keep the
+                // path stable but bump confidence to 1 to clear the dotted
+                // underline.
+                if (!correction) return;
+                const { from, to } = findSpanRange(
+                  editor,
+                  correction.anchorEl,
+                );
+                if (from < 0 || to < 0) return;
+                const markType = editor.schema.marks.glyphField;
+                if (!markType) return;
+                const tr = editor.state.tr;
+                if (newValue !== correction.value) {
+                  tr.insertText(newValue, from, to);
+                }
+                const newTo = from + newValue.length;
+                tr.addMark(
+                  from,
+                  newTo,
+                  markType.create({
+                    path: correction.path,
+                    region: correction.region,
+                    confidence: 1,
+                    verified: true,
+                  }),
+                );
+                tr.setMeta("addToHistory", true);
+                editor.view.dispatch(tr);
+                // Touch newLabel so the linter doesn't flag the unused arg;
+                // when the schema grows a `label` attr we'll persist it here.
+                void newLabel;
+              }}
+              onReject={() => {
+                if (!correction) return;
+                const { from, to } = findSpanRange(
+                  editor,
+                  correction.anchorEl,
+                );
+                if (from < 0 || to < 0) return;
+                editor
+                  .chain()
+                  .focus()
+                  .setTextSelection({ from, to })
+                  .unsetGlyphField()
+                  .run();
+              }}
+            />
+          ) : null}
         </div>
       </div>
       {renderedSidePanel !== null && (
@@ -556,6 +680,60 @@ function applyFieldMarks(
  */
 interface OffsetIndex {
   toDocPos: (textOffset: number) => number | null;
+}
+
+// Normalize the editor's free-form `schemaType` to the typed enum the
+// correction popover expects. Anything off-list collapses to "resume".
+function asCorrectionDocType(raw: string | undefined): CorrectionDocType {
+  if (raw === "contract" || raw === "invoice" || raw === "resume") return raw;
+  return "resume";
+}
+
+// Find the ProseMirror range that backs a given rendered span. We walk every
+// text-bearing position checking whether the editor's coordsAtPos lands
+// inside the element's bounding box — cheaper than tracking node→DOM maps
+// and robust to inline marks splitting a span across multiple text nodes.
+function findSpanRange(
+  editor: Editor,
+  span: HTMLElement,
+): { from: number; to: number } {
+  const view = editor.view;
+  const rect = span.getBoundingClientRect();
+  // domAtPos walks each text node; we look for the node whose DOM is a
+  // descendant of `span`.
+  let from = -1;
+  let to = -1;
+  editor.state.doc.descendants((node, pos) => {
+    if (!node.isText) return true;
+    try {
+      const dom = view.domAtPos(pos);
+      const domNode: Node = dom.node;
+      const target: Element | null =
+        domNode instanceof Text
+          ? domNode.parentElement
+          : domNode instanceof Element
+            ? domNode
+            : null;
+      if (target && span.contains(target)) {
+        if (from < 0) from = pos;
+        to = pos + (node.text?.length ?? 0);
+      }
+    } catch {
+      // domAtPos can throw for transient positions during dispatch.
+    }
+    return true;
+  });
+  // Fallback: derive from cursor position at the rect's center if walk failed.
+  if (from < 0) {
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const at = view.posAtCoords({ left: cx, top: cy });
+    if (at) {
+      from = at.pos;
+      to = at.pos + (span.textContent?.length ?? 0);
+    }
+  }
+  return { from, to };
 }
 
 function buildPlainTextIndex(doc: import("@tiptap/pm/model").Node): OffsetIndex {

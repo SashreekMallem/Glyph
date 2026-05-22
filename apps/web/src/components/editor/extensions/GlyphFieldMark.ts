@@ -11,6 +11,9 @@ import { Mark, mergeAttributes } from "@tiptap/core";
  * Visual treatment lives in `editor/styles.css` so dark mode stays clean.
  */
 
+/** Spans with confidence < this threshold render the "uncertain" UI. */
+export const GLYPH_UNCERTAIN_THRESHOLD = 0.85;
+
 export interface GlyphFieldAttrs {
   /** Dot-notation path, e.g. "personal.full_name" */
   path: string | null;
@@ -20,6 +23,8 @@ export interface GlyphFieldAttrs {
   verified?: boolean | null;
   /** Source-text region [start, end). Used by the sync endpoint. */
   region?: [number, number] | null;
+  /** GLiNER2 confidence 0..1. < 0.85 = "uncertain" = render dotted underline. */
+  confidence?: number | null;
 }
 
 declare module "@tiptap/core" {
@@ -79,6 +84,29 @@ export const GlyphFieldMark = Mark.create<{
           Array.isArray(attrs.region)
             ? { "data-region": attrs.region.join(",") }
             : {},
+      },
+      confidence: {
+        default: null,
+        parseHTML: (el) => {
+          const raw = el.getAttribute("data-glyph-confidence");
+          if (raw === null || raw === "") return null;
+          const n = Number.parseFloat(raw);
+          return Number.isFinite(n) ? n : null;
+        },
+        renderHTML: (attrs) => {
+          if (attrs.confidence === null || attrs.confidence === undefined) {
+            return {};
+          }
+          const n = Number(attrs.confidence);
+          if (!Number.isFinite(n)) return {};
+          const out: Record<string, string> = {
+            "data-glyph-confidence": n.toFixed(3),
+          };
+          if (n < GLYPH_UNCERTAIN_THRESHOLD) {
+            out["data-glyph-uncertain"] = "true";
+          }
+          return out;
+        },
       },
     };
   },

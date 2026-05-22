@@ -17,6 +17,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   text,
@@ -551,3 +552,60 @@ export type SchemaComposition = typeof schemaCompositions.$inferSelect;
 export type NewSchemaComposition = typeof schemaCompositions.$inferInsert;
 export type SchemaBlockProposal = typeof schemaBlockProposals.$inferSelect;
 export type NewSchemaBlockProposal = typeof schemaBlockProposals.$inferInsert;
+
+/**
+ * Span corrections — user feedback on GLiNER2/Gemini extractions.
+ *
+ * Each row captures one path-level correction the user made in the editor:
+ * "GLiNER2 returned X at this path, but the right value is Y" (and
+ * optionally a re-labeling). These rows are the training signal for
+ * fine-tuning the local GLiNER2 model to the user's actual corpus. They
+ * are written separately from `extraction_episodes` so the original
+ * extraction history stays immutable.
+ *
+ * `docType` is the built-in `document_type` enum (resume / contract /
+ * invoice / custom). For custom types the corrected path is still
+ * captured but downstream training will need to consult the
+ * `documents.documentTypeKey` for full disambiguation.
+ */
+export const spanCorrections = pgTable(
+  "span_corrections",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    // references auth.users(id)
+    userId: uuid("user_id").notNull(),
+    docId: uuid("doc_id").references(() => documents.id, {
+      onDelete: "set null",
+    }),
+    docType: documentTypeEnum("doc_type").notNull(),
+    /** Dot-notation path into the validated payload (e.g. "personal.full_name"). */
+    path: text("path").notNull(),
+    /** What the upstream extractor returned. Null if the field was empty. */
+    originalValue: text("original_value"),
+    /** What the user changed it to. */
+    correctedValue: text("corrected_value").notNull(),
+    /** Label/category emitted by GLiNER2 at extraction time. */
+    originalLabel: text("original_label"),
+    /** New label/category if the user re-categorized the span. */
+    correctedLabel: text("corrected_label"),
+    /** Confidence reported by GLiNER2 at the time of the correction. */
+    confidence: numeric("confidence", { precision: 4, scale: 3 }),
+    regionStart: integer("region_start"),
+    regionEnd: integer("region_end"),
+    /** The actual text snippet that was originally extracted. */
+    sourceText: text("source_text"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    userIdx: index("idx_span_corrections_user").on(t.userId),
+    docTypeIdx: index("idx_span_corrections_doctype").on(t.docType),
+    createdIdx: index("idx_span_corrections_created").on(t.createdAt.desc()),
+  }),
+);
+
+export type SpanCorrection = typeof spanCorrections.$inferSelect;
+export type NewSpanCorrection = typeof spanCorrections.$inferInsert;

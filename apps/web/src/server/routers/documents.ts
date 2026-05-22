@@ -7,6 +7,7 @@ import {
   documentExports,
   documents,
   documentTypes,
+  spanCorrections,
   type Document,
 } from "@/db/schema";
 import { protectedProcedure, rateLimited, router } from "../trpc";
@@ -761,5 +762,57 @@ export const documentsRouter = router({
       return {
         googleDocsUrl: `https://docs.google.com/document/d/stub-${input.id}/edit`,
       };
+    }),
+
+  /**
+   * Record a user-supplied correction to a GLiNER2/Gemini extraction.
+   *
+   * The mutation is intentionally schemaless w.r.t. the `path` value
+   * because we want to capture corrections against any field anywhere in
+   * the validated payload — the training pipeline (offline) reconciles
+   * paths against the live schemas. Confidence and source-text are
+   * optional so the editor can submit corrections even when GLiNER2
+   * didn't return them (e.g. user typed in a value GLiNER missed).
+   */
+  submitCorrection: protectedProcedure
+    .use(perUserWrite)
+    .input(
+      z.object({
+        docId: z.string().uuid().optional(),
+        docType: z.enum(["resume", "contract", "invoice"]),
+        path: z.string().min(1),
+        originalValue: z.string().nullable(),
+        correctedValue: z.string(),
+        originalLabel: z.string().nullable(),
+        correctedLabel: z.string().nullable(),
+        confidence: z.number().min(0).max(1).nullable(),
+        regionStart: z.number().int().nullable(),
+        regionEnd: z.number().int().nullable(),
+        sourceText: z.string().nullable(),
+      }),
+    )
+    .output(z.object({ ok: z.literal(true) }))
+    .mutation(async ({ ctx, input }) => {
+      // Drizzle's `numeric` columns are typed as `string | null`. Convert
+      // the incoming number to a string with three decimals to match the
+      // column's precision(4,3) — Postgres will round otherwise but the
+      // explicit conversion keeps the stored representation stable.
+      const confidenceStr =
+        input.confidence === null ? null : input.confidence.toFixed(3);
+      await db.insert(spanCorrections).values({
+        userId: ctx.user.id,
+        docId: input.docId ?? null,
+        docType: input.docType,
+        path: input.path,
+        originalValue: input.originalValue,
+        correctedValue: input.correctedValue,
+        originalLabel: input.originalLabel,
+        correctedLabel: input.correctedLabel,
+        confidence: confidenceStr,
+        regionStart: input.regionStart,
+        regionEnd: input.regionEnd,
+        sourceText: input.sourceText,
+      });
+      return { ok: true as const };
     }),
 });
